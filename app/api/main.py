@@ -1,0 +1,707 @@
+"""
+HSEG REST API - FastAPI server for psychological risk assessment
+Provides endpoints for individual and organizational risk prediction
+"""
+
+import asyncio
+import json
+import uvicorn
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any
+from pathlib import Path
+import logging
+
+# FastAPI imports
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field, validator
+import pandas as pd
+import io
+
+# Database imports
+from app.config.database_config import (
+    get_db, startup_database, shutdown_database,
+    health_check as db_health_check
+)
+from app.models.database_models import (
+    Organization, SurveyCampaign, SurveyResponse, OrganizationRiskProfile,
+    DatabaseUtils, DomainType, RiskTier
+)
+from sqlalchemy.orm import Session
+
+# ML Pipeline imports
+from app.core.ml_pipeline import (
+    initialize_ml_pipeline, predict_individual, predict_organization,
+    process_campaign, get_pipeline_status, health_check as ml_health_check
+)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="HSEG Psychological Risk Assessment API",
+    description="API for workplace culture and psychological safety assessment",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure based on deployment needs
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Security
+security = HTTPBearer(auto_error=False)
+
+# Pydantic models for API
+class SurveyResponseData(BaseModel):
+    response_id: Optional[str] = None
+    domain: str = Field(..., description="Healthcare, University, or Business")
+    survey_responses: Dict[str, float] = Field(..., description="Q1-Q22 responses (1-4 scale)")
+    text_responses: Optional[Dict[str, str]] = Field(default={}, description="Open-ended text responses")
+    demographics: Optional[Dict[str, Any]] = Field(default={}, description="Demographic information")
+    response_quality: Optional[Dict[str, Any]] = Field(default={}, description="Response quality metrics")
+    
+    @validator('domain')
+    def validate_domain(cls, v):
+        if v not in ['Healthcare', 'University', 'Business']:
+            raise ValueError('Domain must be Healthcare, University, or Business')
+        return v
+    
+    @validator('survey_responses')
+    def validate_responses(cls, v):
+        for key, value in v.items():
+            if not (1.0 <= value <= 4.0):
+                raise ValueError(f'Response {key} must be between 1.0 and 4.0')
+        return v
+
+class OrganizationInfo(BaseModel):
+    org_id: str
+    org_name: str
+    domain: str
+    employee_count: Optional[int] = 100
+    founded_year: Optional[int] = 2000
+    is_public_company: Optional[bool] = False
+    industry_code: Optional[str] = None
+    headquarters_location: Optional[str] = None
+
+class BatchPredictionRequest(BaseModel):
+    organization_info: OrganizationInfo
+    individual_responses: List[SurveyResponseData]
+    
+    @validator('individual_responses')
+    def validate_responses(cls, v):
+        if len(v) < 5:
+            raise ValueError('Minimum 5 individual responses required for organizational assessment')
+        if len(v) > 500:
+            raise ValueError('Maximum 500 individual responses allowed per request')
+        return v
+
+class IndividualPredictionResponse(BaseModel):
+    response_id: str
+    overall_hseg_score: float
+    overall_risk_tier: str
+    category_scores: Dict[int, float]
+    category_risk_levels: Dict[int, str]
+    confidence_score: float
+    contributing_factors: List[str]
+    recommended_interventions: List[Dict]
+    processing_time_ms: float
+
+class OrganizationalPredictionResponse(BaseModel):
+    organization_id: str
+    overall_assessment: Dict[str, Any]
+    category_breakdown: Dict[int, Dict[str, Any]]
+    demographic_analysis: Dict[str, Dict[str, float]]
+    intervention_recommendations: List[Dict[str, Any]]
+    benchmarking: Dict[str, Any]
+    risk_indicators: Dict[str, Any]
+
+class HealthCheckResponse(BaseModel):
+    status: str
+    timestamp: str
+    database: Dict[str, Any]
+    ml_pipeline: Dict[str, Any]
+    api_version: str
+
+# Authentication dependency (mock - implement proper auth for production)
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    # Mock authentication - replace with real implementation
+    if credentials and credentials.credentials == "test-token":
+        return {"user_id": "test_user", "permissions": ["read", "write"]}
+    return {"user_id": "anonymous", "permissions": ["read"]}
+
+# Startup and shutdown events
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database and ML pipeline on startup"""
+    try:
+        logger.info("Starting HSEG API server...")
+        
+        # Initialize database
+        await startup_database()
+        logger.info("Database initialized")
+        
+        # Initialize ML pipeline
+        pipeline_ready = await initialize_ml_pipeline()
+        if pipeline_ready:
+            logger.info("ML Pipeline initialized successfully")
+        else:
+            logger.warning("ML Pipeline initialization incomplete - some features may be limited")
+        
+        logger.info("HSEG API server startup complete")
+        
+    except Exception as e:
+        logger.error(f"Startup failed: {e}")
+        raise
+
+@app.on_event("shutdown") 
+async def shutdown_event():
+    """Cleanup on server shutdown"""
+    try:
+        await shutdown_database()
+        logger.info("HSEG API server shutdown complete")
+    except Exception as e:
+        logger.error(f"Shutdown error: {e}")
+
+# Health check endpoints
+@app.get("/health", response_model=HealthCheckResponse)
+async def health_check():
+    """Health check endpoint"""
+    try:
+        # Check database
+        db_status = db_health_check()
+        
+        # Check ML pipeline
+        ml_status = await ml_health_check()
+        
+        # Overall status
+        overall_status = "healthy"
+        if db_status["status"] != "healthy" or ml_status["status"] != "healthy":
+            overall_status = "degraded"
+        
+        return HealthCheckResponse(
+            status=overall_status,
+            timestamp=datetime.now().isoformat(),
+            database=db_status,
+            ml_pipeline=ml_status,
+            api_version="1.0.0"
+        )
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
+
+@app.get("/pipeline/status")
+async def pipeline_status(user: dict = Depends(get_current_user)):
+    """Get ML pipeline status and performance metrics"""
+    try:
+        status = get_pipeline_status()
+        return JSONResponse(content=status)
+    except Exception as e:
+        logger.error(f"Pipeline status check failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Individual prediction endpoints
+@app.post("/predict/individual", response_model=IndividualPredictionResponse)
+async def predict_individual_risk(
+    response_data: SurveyResponseData,
+    user: dict = Depends(get_current_user)
+):
+    """Predict psychological risk for individual survey response"""
+    try:
+        # Convert Pydantic model to dict
+        data_dict = response_data.dict()
+        
+        # Add user context
+        data_dict['user_id'] = user.get('user_id')
+        data_dict['prediction_timestamp'] = datetime.now().isoformat()
+        
+        # Predict individual risk
+        prediction = await predict_individual(data_dict)
+        
+        if 'error' in prediction:
+            raise HTTPException(status_code=400, detail=prediction['error'])
+        
+        return IndividualPredictionResponse(**prediction)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Individual prediction failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+
+@app.post("/predict/batch/individual")
+async def predict_batch_individual(
+    responses: List[SurveyResponseData],
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user)
+):
+    """Predict psychological risk for multiple individual responses"""
+    try:
+        if len(responses) > 100:
+            raise HTTPException(status_code=400, detail="Maximum 100 responses per batch")
+        
+        predictions = []
+        for response_data in responses:
+            data_dict = response_data.dict()
+            data_dict['user_id'] = user.get('user_id')
+            
+            prediction = await predict_individual(data_dict)
+            predictions.append(prediction)
+        
+        return {
+            "total_responses": len(responses),
+            "successful_predictions": len([p for p in predictions if 'error' not in p]),
+            "failed_predictions": len([p for p in predictions if 'error' in p]),
+            "predictions": predictions
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Batch prediction failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Organizational prediction endpoints
+@app.post("/predict/organizational", response_model=OrganizationalPredictionResponse)
+async def predict_organizational_risk(
+    request: BatchPredictionRequest,
+    user: dict = Depends(get_current_user)
+):
+    """Predict organizational risk from aggregated individual responses"""
+    try:
+        # Get individual predictions first
+        individual_predictions = []
+        for response_data in request.individual_responses:
+            data_dict = response_data.dict()
+            data_dict['user_id'] = user.get('user_id')
+            
+            prediction = await predict_individual(data_dict)
+            if 'error' not in prediction:
+                individual_predictions.append(prediction)
+        
+        if len(individual_predictions) < 5:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Insufficient valid responses: {len(individual_predictions)} (minimum 5 required)"
+            )
+        
+        # Predict organizational risk
+        org_prediction = await predict_organization(
+            request.organization_info.org_id,
+            individual_predictions,
+            request.organization_info.dict()
+        )
+        
+        if 'error' in org_prediction:
+            raise HTTPException(status_code=400, detail=org_prediction['error'])
+        
+        return OrganizationalPredictionResponse(**org_prediction)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Organizational prediction failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Database-driven endpoints
+@app.get("/organizations")
+async def list_organizations(
+    domain: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user)
+):
+    """List organizations in database"""
+    try:
+        query = db.query(Organization)
+        
+        if domain:
+            if domain not in ['Healthcare', 'University', 'Business']:
+                raise HTTPException(status_code=400, detail="Invalid domain")
+            query = query.filter(Organization.domain == DomainType(domain))
+        
+        organizations = query.offset(offset).limit(limit).all()
+        
+        return {
+            "organizations": [
+                {
+                    "org_id": org.org_id,
+                    "org_name": org.org_name,
+                    "domain": org.domain.value,
+                    "employee_count": org.employee_count,
+                    "founded_year": org.founded_year
+                }
+                for org in organizations
+            ],
+            "total": query.count(),
+            "limit": limit,
+            "offset": offset
+        }
+        
+    except Exception as e:
+        logger.error(f"List organizations failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/organizations/{org_id}/risk-profile")
+async def get_organization_risk_profile(
+    org_id: str,
+    campaign_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user)
+):
+    """Get organization's latest risk profile"""
+    try:
+        query = db.query(OrganizationRiskProfile).filter(
+            OrganizationRiskProfile.org_id == org_id
+        )
+        
+        if campaign_id:
+            query = query.filter(OrganizationRiskProfile.campaign_id == campaign_id)
+        
+        risk_profile = query.order_by(OrganizationRiskProfile.calculated_at.desc()).first()
+        
+        if not risk_profile:
+            raise HTTPException(status_code=404, detail="Risk profile not found")
+        
+        return {
+            "org_id": risk_profile.org_id,
+            "campaign_id": risk_profile.campaign_id,
+            "overall_hseg_score": risk_profile.overall_hseg_score,
+            "overall_risk_tier": risk_profile.overall_risk_tier.value,
+            "sample_size": risk_profile.sample_size,
+            "confidence_level": risk_profile.confidence_level,
+            "category_scores": json.loads(risk_profile.category_scores or "{}"),
+            "predicted_outcomes": json.loads(risk_profile.predicted_outcomes or "{}"),
+            "intervention_priorities": json.loads(risk_profile.intervention_priorities or "[]"),
+            "benchmark_percentile": risk_profile.benchmark_percentile,
+            "industry_comparison": risk_profile.industry_comparison,
+            "calculated_at": risk_profile.calculated_at.isoformat(),
+            "model_version": risk_profile.model_version
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get risk profile failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/campaigns/{campaign_id}/process")
+async def process_survey_campaign(
+    campaign_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user)
+):
+    """Process survey campaign and generate risk assessment"""
+    try:
+        # Check if campaign exists
+        campaign = db.query(SurveyCampaign).filter(
+            SurveyCampaign.campaign_id == campaign_id
+        ).first()
+        
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        
+        # Check user permissions
+        if "write" not in user.get("permissions", []):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        
+        # Process campaign in background
+        background_tasks.add_task(process_campaign_background, campaign_id)
+        
+        return {
+            "message": "Campaign processing started",
+            "campaign_id": campaign_id,
+            "status": "processing",
+            "estimated_completion": (datetime.now() + timedelta(minutes=5)).isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Campaign processing failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def process_campaign_background(campaign_id: str):
+    """Background task to process campaign"""
+    try:
+        result = await process_campaign(campaign_id)
+        logger.info(f"Campaign {campaign_id} processed successfully")
+        return result
+    except Exception as e:
+        logger.error(f"Background campaign processing failed: {e}")
+
+# File upload endpoints
+@app.post("/upload/survey-data")
+async def upload_survey_data(
+    file: UploadFile = File(...),
+    organization_id: Optional[str] = None,
+    user: dict = Depends(get_current_user)
+):
+    """Upload survey data from CSV/Excel file"""
+    try:
+        # Check permissions
+        if "write" not in user.get("permissions", []):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        
+        # Read file
+        if file.content_type not in ["text/csv", "application/vnd.ms-excel", 
+                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
+            raise HTTPException(status_code=400, detail="File must be CSV or Excel")
+        
+        content = await file.read()
+        
+        # Parse data based on file type
+        if file.content_type == "text/csv":
+            df = pd.read_csv(io.StringIO(content.decode('utf-8')))
+        else:
+            df = pd.read_excel(io.BytesIO(content))
+        
+        # Validate required columns
+        required_columns = ['Domain', 'Q1_Safe_Speaking_Up', 'Q2_Leadership_Silencing']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Missing required columns: {missing_columns}"
+            )
+        
+        # Process each row
+        predictions = []
+        for index, row in df.iterrows():
+            try:
+                # Convert row to survey response format
+                response_data = convert_row_to_response_data(row, index)
+                
+                # Predict individual risk
+                prediction = await predict_individual(response_data)
+                predictions.append(prediction)
+                
+            except Exception as e:
+                logger.warning(f"Failed to process row {index}: {e}")
+                predictions.append({"error": str(e), "row": index})
+        
+        return {
+            "file_name": file.filename,
+            "total_rows": len(df),
+            "successful_predictions": len([p for p in predictions if 'error' not in p]),
+            "failed_predictions": len([p for p in predictions if 'error' in p]),
+            "predictions": predictions[:10],  # Return first 10 for preview
+            "organization_id": organization_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"File upload failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def convert_row_to_response_data(row: pd.Series, index: int) -> Dict:
+    """Convert pandas row to survey response data format"""
+    
+    # Extract survey responses (Q1-Q22)
+    survey_responses = {}
+    for i in range(1, 23):
+        col_names = [f'Q{i}', f'Q{i}_Score', f'Question_{i}']
+        for col_name in col_names:
+            if col_name in row.index and pd.notna(row[col_name]):
+                survey_responses[f'q{i}'] = float(row[col_name])
+                break
+        else:
+            survey_responses[f'q{i}'] = 2.5  # Default neutral value
+    
+    # Extract demographics
+    demographics = {}
+    demo_mapping = {
+        'Age_Range': 'age_range',
+        'Gender': 'gender_identity', 
+        'Tenure': 'tenure_range',
+        'Position': 'position_level',
+        'Department': 'department'
+    }
+    
+    for excel_col, api_col in demo_mapping.items():
+        if excel_col in row.index and pd.notna(row[excel_col]):
+            demographics[api_col] = str(row[excel_col])
+    
+    # Extract text responses
+    text_responses = {}
+    text_columns = ['Q23_Change_One_Thing', 'Q24_Mental_Health_Impact', 'Q25_Workplace_Strength']
+    for col in text_columns:
+        if col in row.index and pd.notna(row[col]):
+            text_responses[col[:3]] = str(row[col])
+    
+    return {
+        'response_id': f'upload_{index}',
+        'domain': str(row.get('Domain', 'Business')),
+        'survey_responses': survey_responses,
+        'text_responses': text_responses,
+        'demographics': demographics,
+        'response_quality': {
+            'response_quality_score': 0.8,
+            'attention_check_passed': True,
+            'straight_line_response': False
+        }
+    }
+
+# Analytics endpoints
+@app.get("/analytics/dashboard/{org_id}")
+async def get_dashboard_data(
+    org_id: str,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user)
+):
+    """Get dashboard data for organization visualization"""
+    try:
+        # Get latest risk profile
+        risk_profile = db.query(OrganizationRiskProfile).filter(
+            OrganizationRiskProfile.org_id == org_id
+        ).order_by(OrganizationRiskProfile.calculated_at.desc()).first()
+        
+        if not risk_profile:
+            raise HTTPException(status_code=404, detail="No risk assessment found for organization")
+        
+        # Get organization info
+        organization = db.query(Organization).filter(Organization.org_id == org_id).first()
+        
+        # Prepare dashboard data
+        dashboard_data = {
+            "organization": {
+                "org_id": organization.org_id,
+                "org_name": organization.org_name,
+                "domain": organization.domain.value,
+                "employee_count": organization.employee_count
+            },
+            "overall_assessment": {
+                "hseg_score": risk_profile.overall_hseg_score,
+                "risk_tier": risk_profile.overall_risk_tier.value,
+                "sample_size": risk_profile.sample_size,
+                "confidence_level": risk_profile.confidence_level,
+                "benchmark_percentile": risk_profile.benchmark_percentile
+            },
+            "category_breakdown": json.loads(risk_profile.category_scores or "{}"),
+            "predicted_outcomes": json.loads(risk_profile.predicted_outcomes or "{}"),
+            "intervention_priorities": json.loads(risk_profile.intervention_priorities or "[]"),
+            "visualization_data": {
+                "tier_color": {
+                    "Crisis": "#DC3545",
+                    "At_Risk": "#FD7E14", 
+                    "Mixed": "#6C757D",
+                    "Safe": "#0D6EFD",
+                    "Thriving": "#198754"
+                }.get(risk_profile.overall_risk_tier.value, "#6C757D"),
+                "chart_data": prepare_chart_data(risk_profile),
+                "alerts": generate_dashboard_alerts(risk_profile)
+            },
+            "last_updated": risk_profile.calculated_at.isoformat()
+        }
+        
+        return dashboard_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Dashboard data retrieval failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def prepare_chart_data(risk_profile: OrganizationRiskProfile) -> Dict:
+    """Prepare data for dashboard charts"""
+    category_scores = json.loads(risk_profile.category_scores or "{}")
+    
+    return {
+        "category_pie_chart": [
+            {"name": "Power Abuse", "value": category_scores.get("1", {}).get("score", 0), "color": "#DC3545"},
+            {"name": "Discrimination", "value": category_scores.get("2", {}).get("score", 0), "color": "#FD7E14"},
+            {"name": "Manipulation", "value": category_scores.get("3", {}).get("score", 0), "color": "#FFC107"},
+            {"name": "Accountability", "value": category_scores.get("4", {}).get("score", 0), "color": "#28A745"},
+            {"name": "Mental Health", "value": category_scores.get("5", {}).get("score", 0), "color": "#17A2B8"},
+            {"name": "Voice/Autonomy", "value": category_scores.get("6", {}).get("score", 0), "color": "#6F42C1"}
+        ],
+        "risk_gauge": {
+            "value": risk_profile.overall_hseg_score,
+            "min": 7,
+            "max": 28,
+            "zones": [
+                {"min": 7, "max": 12, "color": "#DC3545", "label": "Crisis"},
+                {"min": 13, "max": 16, "color": "#FD7E14", "label": "At Risk"},
+                {"min": 17, "max": 20, "color": "#6C757D", "label": "Mixed"},
+                {"min": 21, "max": 24, "color": "#0D6EFD", "label": "Safe"},
+                {"min": 25, "max": 28, "color": "#198754", "label": "Thriving"}
+            ]
+        }
+    }
+
+def generate_dashboard_alerts(risk_profile: OrganizationRiskProfile) -> List[Dict]:
+    """Generate alerts for dashboard"""
+    alerts = []
+    
+    if risk_profile.overall_risk_tier == RiskTier.CRISIS:
+        alerts.append({
+            "type": "error",
+            "title": "Critical Risk Detected",
+            "message": "Immediate intervention required. Multiple psychological safety issues detected.",
+            "urgency": "immediate"
+        })
+    elif risk_profile.overall_risk_tier == RiskTier.AT_RISK:
+        alerts.append({
+            "type": "warning", 
+            "title": "Risk Warning",
+            "message": "Early warning signs detected. Preventive action recommended.",
+            "urgency": "high"
+        })
+    
+    if risk_profile.sample_size < 20:
+        alerts.append({
+            "type": "info",
+            "title": "Limited Sample Size",
+            "message": f"Assessment based on {risk_profile.sample_size} responses. More data recommended for higher confidence.",
+            "urgency": "low"
+        })
+    
+    return alerts
+
+# Error handlers
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail,
+            "status_code": exc.status_code,
+            "timestamp": datetime.now().isoformat()
+        }
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    logger.error(f"Unhandled exception: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "status_code": 500,
+            "timestamp": datetime.now().isoformat()
+        }
+    )
+
+# Main entry point
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )

@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  hseg-api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: hseg-ai-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./data/hseg_database.db
+      - LOG_LEVEL=INFO
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - MODEL_VERSION=v1.0.0
+      - ENABLE_MODEL_TRAINING=true
+    volumes:
+      - hseg_data:/app/data
+      - hseg_logs:/app/logs
+      - hseg_models:/app/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - hseg-network
+
+  # Optional: Nginx reverse proxy for production
+  nginx:
+    image: nginx:alpine
+    container_name: hseg-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/ssl/certs:ro
+    depends_on:
+      - hseg-api
+    restart: unless-stopped
+    networks:
+      - hseg-network
+    profiles:
+      - production
+
+volumes:
+  hseg_data:
+    driver: local
+  hseg_logs:
+    driver: local
+  hseg_models:
+    driver: local
+
+networks:
+  hseg-network:
+    driver: bridge
