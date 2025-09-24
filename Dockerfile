@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y \
 RUN groupadd -r hseg && useradd -r -g hseg hseg
 
 # Create directories
-RUN mkdir -p /app /app/models /app/data /app/logs
+RUN mkdir -p /app /app/models /app/data /app/logs /app/database
 WORKDIR /app
 
 # Stage 2: Dependencies installation

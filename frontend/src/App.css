@@ -23,6 +23,48 @@
   color: #61dafb;
 }
 
+/* Enterprise style tweaks */
+.enterprise-card {
+  background: #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 6px 16px rgba(0,0,0,0.06);
+  border: 1px solid rgba(0,0,0,0.06);
+}
+
+.section-header {
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.muted-text {
+  color: #6b7280;
+}
+
+.kpi-card {
+  background: linear-gradient(135deg, rgba(25,118,210,0.95), rgba(25,118,210,0.85));
+  color: #fff;
+}
+
+.alert-info {
+  border-left: 4px solid #2196f3;
+}
+
+.alert-warning {
+  border-left: 4px solid #ff9800;
+}
+
+.stack-gap > * {
+  margin-bottom: 12px;
+}
+
+/* Print-friendly PDF export for organizational summary */
+@media print {
+  body * { visibility: hidden !important; }
+  #org-pdf-summary, #org-pdf-summary * { visibility: visible !important; }
+  #org-pdf-summary { position: absolute; left: 0; top: 0; width: 100%; }
+  .MuiContainer-root, .MuiPaper-root { box-shadow: none !important; }
+}
+
 @keyframes App-logo-spin {
   from {
     transform: rotate(0deg);

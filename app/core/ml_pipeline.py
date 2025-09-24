@@ -14,7 +14,8 @@ import traceback
 
 # Database imports
 from sqlalchemy.orm import Session
-from app.config.database_config import SessionLocal, async_db
+from sqlalchemy import text as sa_text
+from app.config.database_config import SessionLocal, async_db, engine, health_check as db_health_check
 from app.models.database_models import (
     Organization, SurveyResponse, OrganizationRiskProfile,
     AIRiskScore, ModelPrediction, HSEGCategory, DatabaseUtils
@@ -41,13 +42,19 @@ class HSEGMLPipeline:
         # Initialize models
         self.individual_model = IndividualRiskPredictor(model_version)
         self.text_classifier = TextRiskClassifier(model_version=model_version)
-        self.org_model = OrganizationalRiskAggregator(model_version)
+        # Organizational model expects an optional model_path, not a version
+        self.org_model = OrganizationalRiskAggregator()
         
         # Model paths
+        # Use versioned trained models if present
+        version_dir = Path(f"app/models/trained/{self.model_version}")
+        base_dir = version_dir if version_dir.exists() else Path("app/models/trained")
         self.model_paths = {
-            'individual': 'models/individual_risk_model.pkl',
-            'text': 'models/text_risk_classifier.pt',
-            'organizational': 'models/organizational_risk_model.pkl'
+            'individual': str(base_dir / 'individual_risk_model.pkl'),
+            # Text model: prefer .pt (torch checkpoint). If missing, fallback to rule-based.
+            'text_pt': str(base_dir / 'text_risk_classifier.pt'),
+            'text_pkl': str(base_dir / 'text_risk_classifier.pkl'),
+            'organizational': str(base_dir / 'organizational_risk_model.pkl')
         }
         
         # Pipeline status
@@ -94,6 +101,28 @@ class HSEGMLPipeline:
             logger.error(f"Pipeline initialization failed: {e}")
             traceback.print_exc()
             return False
+
+    async def reload_models(self) -> bool:
+        """Reload models from disk without training (for API reload)."""
+        try:
+            logger.info("Reloading HSEG models from disk...")
+            # Recompute versioned paths in case version changed externally
+            version_dir = Path(f"app/models/trained/{self.model_version}")
+            base_dir = version_dir if version_dir.exists() else Path("app/models/trained")
+            self.model_paths.update({
+                'individual': str(base_dir / 'individual_risk_model.pkl'),
+                'text_pt': str(base_dir / 'text_risk_classifier.pt'),
+                'text_pkl': str(base_dir / 'text_risk_classifier.pkl'),
+                'organizational': str(base_dir / 'organizational_risk_model.pkl')
+            })
+
+            loaded = await self._load_existing_models()
+            self.models_loaded = loaded
+            self.pipeline_ready = loaded
+            return loaded
+        except Exception as e:
+            logger.error(f"Reload failed: {e}")
+            return False
     
     async def _load_existing_models(self) -> bool:
         """Load existing trained models"""
@@ -106,17 +135,27 @@ class HSEGMLPipeline:
                 models_loaded += 1
                 logger.info("Individual risk model loaded")
             
-            # Load text classifier
-            if Path(self.model_paths['text']).exists():
-                self.text_classifier.load_model(self.model_paths['text'])
+            # Load text classifier (optional)
+            if Path(self.model_paths['text_pt']).exists():
+                self.text_classifier.load_model(self.model_paths['text_pt'])
                 models_loaded += 1
-                logger.info("Text risk classifier loaded")
+                logger.info("Text risk classifier loaded (.pt)")
+            elif Path(self.model_paths['text_pkl']).exists():
+                # Attempt to load legacy .pkl if present
+                try:
+                    self.text_classifier.load_model(self.model_paths['text_pkl'])
+                    models_loaded += 1
+                    logger.info("Text risk classifier loaded (.pkl)")
+                except Exception as e:
+                    logger.warning(f"Failed to load text classifier checkpoint: {e}. Will use rule-based fallback.")
             
             # Load organizational model
             if Path(self.model_paths['organizational']).exists():
-                self.org_model.load_model(self.model_paths['organizational'])
-                models_loaded += 1
-                logger.info("Organizational risk model loaded")
+                # Organizational model manages its own path
+                self.org_model.model_path = self.model_paths['organizational']
+                if self.org_model.load_model():
+                    models_loaded += 1
+                    logger.info("Organizational risk model loaded")
             
             return models_loaded >= 2  # At least 2 models needed for basic functionality
             
@@ -147,12 +186,11 @@ class HSEGMLPipeline:
             # Train text classifier
             logger.info("Training text risk classifier...")
             text_metrics = self.text_classifier.train(text_training_data, epochs=2)
-            self.text_classifier.save_model(self.model_paths['text'])
+            # Save torch checkpoint under trained path
+            self.text_classifier.save_model(self.model_paths['text_pt'])
             
-            # Train organizational model
-            logger.info("Training organizational risk model...")
-            org_metrics = self.org_model.train(org_training_data)
-            self.org_model.save_model(self.model_paths['organizational'])
+            # Organizational model in this codebase loads from a pre-trained artifact.
+            # Skipping training here as there is no training method implemented.
             
             logger.info("All models trained successfully")
             
@@ -374,6 +412,9 @@ class HSEGMLPipeline:
                 'text_risk_analysis': text_analysis,
                 'processing_time_ms': (datetime.now() - start_time).total_seconds() * 1000
             }
+            # Ensure response_id is a valid non-empty string for API schema
+            if not combined_prediction.get('response_id'):
+                combined_prediction['response_id'] = response_data.get('response_id') or 'unknown'
             
             # Update stats
             self.prediction_stats['total_predictions'] += 1
@@ -402,7 +443,7 @@ class HSEGMLPipeline:
         
         try:
             # Predict organizational risk
-            org_prediction = self.org_model.predict(individual_predictions, organization_info)
+            org_prediction = self.org_model.predict_organizational_risk(individual_predictions, organization_info)
             
             # Add processing metadata
             org_prediction['processing_time_ms'] = (datetime.now() - start_time).total_seconds() * 1000
@@ -643,12 +684,15 @@ class HSEGMLPipeline:
             'model_version': self.model_version,
             'individual_model_trained': self.individual_model.is_trained,
             'text_classifier_trained': self.text_classifier.is_trained,
-            'organizational_model_trained': self.org_model.is_trained,
+            'organizational_model_loaded': getattr(self.org_model, 'is_loaded', False),
             'performance_stats': self.prediction_stats,
             'model_info': {
                 'individual': self.individual_model.get_model_info(),
                 'text': self.text_classifier.get_model_info(),
-                'organizational': self.org_model.get_model_info()
+                'organizational': {
+                    'is_loaded': getattr(self.org_model, 'is_loaded', False),
+                    'model_path': getattr(self.org_model, 'model_path', None)
+                }
             }
         }
     
@@ -665,18 +709,20 @@ class HSEGMLPipeline:
             health_status['checks']['models_loaded'] = self.models_loaded
             health_status['checks']['pipeline_ready'] = self.pipeline_ready
             
-            # Check database connectivity
+            # Use the same DB health check as the API top-level to keep results consistent
             try:
-                with SessionLocal() as db:
-                    db.execute("SELECT 1").scalar()
-                health_status['checks']['database'] = True
+                db_ok = db_health_check().get('status') == 'healthy'
+                health_status['checks']['database'] = db_ok
+                if not db_ok:
+                    health_status['status'] = 'degraded'
             except Exception as e:
                 health_status['checks']['database'] = False
                 health_status['status'] = 'degraded'
             
             # Test prediction capability with sample data
             try:
-                from individual_risk_model import create_sample_response_data
+                # Correct package import path
+                from app.models.individual_risk_model import create_sample_response_data
                 sample_data = create_sample_response_data()
                 test_prediction = await self.predict_individual_risk(sample_data)
                 health_status['checks']['prediction_capability'] = 'error' not in test_prediction
@@ -723,6 +769,17 @@ async def health_check() -> Dict[str, Any]:
     """Perform health check of global pipeline"""
     return await pipeline.health_check()
 
+async def reload_models() -> Dict[str, Any]:
+    """Reload models without training and return status."""
+    status = await pipeline.reload_models()
+    return {
+        'reloaded': status,
+        'model_paths': pipeline.model_paths,
+        'pipeline_ready': pipeline.pipeline_ready,
+        'models_loaded': pipeline.models_loaded,
+        'model_version': pipeline.model_version
+    }
+
 # Export main components
 __all__ = [
     'HSEGMLPipeline',
@@ -732,6 +789,7 @@ __all__ = [
     'predict_organization', 
     'process_campaign',
     'get_pipeline_status',
-    'health_check'
+    'health_check',
+    'reload_models'
 ]
     

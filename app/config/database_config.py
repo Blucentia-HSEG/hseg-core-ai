@@ -5,6 +5,7 @@ Optimized for fast, serverless deployment with built-in connection pooling
 
 import os
 import sqlite3
+from pathlib import Path
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -13,9 +14,11 @@ import asyncio
 import aiosqlite
 from contextlib import asynccontextmanager
 
-# Database Configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./hseg_database.db")
-DATABASE_FILE = "hseg_database.db"
+# Database Configuration (default to ./database/hseg_database.db)
+DEFAULT_DB_DIR = Path("database")
+DEFAULT_DB_DIR.mkdir(exist_ok=True)
+DATABASE_FILE = str(DEFAULT_DB_DIR / "hseg_database.db")
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATABASE_FILE}")
 
 # SQLAlchemy Configuration for Serverless
 engine = create_engine(

@@ -7,6 +7,7 @@ import asyncio
 import json
 import uvicorn
 from datetime import datetime, timedelta
+import uuid
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 import logging
@@ -16,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, File, Uplo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, ConfigDict
 import pandas as pd
 import io
 
@@ -34,8 +35,10 @@ from sqlalchemy.orm import Session
 # ML Pipeline imports
 from app.core.ml_pipeline import (
     initialize_ml_pipeline, predict_individual, predict_organization,
-    process_campaign, get_pipeline_status, health_check as ml_health_check
+    process_campaign, get_pipeline_status, health_check as ml_health_check,
+    reload_models as ml_reload_models
 )
+from app.core import scoring as HSEG_SCORING
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -64,6 +67,47 @@ security = HTTPBearer(auto_error=False)
 
 # Pydantic models for API
 class SurveyResponseData(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "response_id": "sample_001",
+                    "domain": "Business",
+                    "survey_responses": {
+                        "q1": 3.0, "q2": 3.0, "q3": 2.5, "q4": 3.0,
+                        "q5": 3.0, "q6": 3.0, "q7": 2.5,
+                        "q8": 3.0, "q9": 2.5, "q10": 3.0,
+                        "q11": 3.0, "q12": 2.5, "q13": 3.0, "q14": 2.5,
+                        "q15": 2.5, "q16": 2.5, "q17": 3.0, "q18": 3.0,
+                        "q19": 3.0, "q20": 3.0, "q21": 2.5, "q22": 3.0
+                    },
+                    "text_responses": {
+                        "q23": "Improve transparency in decisions affecting teams.",
+                        "q24": "Work has caused occasional anxiety in busy periods.",
+                        "q25": "Strong peer collaboration and knowledge sharing."
+                    },
+                    "demographics": {
+                        "age_range": "25-34",
+                        "gender_identity": "Prefer_not_to_say",
+                        "tenure_range": "1-3_years",
+                        "position_level": "Mid",
+                        "department": "Engineering",
+                        "supervises_others": False,
+                        "work_location": "Hybrid",
+                        "employment_status": "Full_Time",
+                        "education_level": "Bachelors"
+                    },
+                    "response_quality": {
+                        "completion_time_seconds": 240,
+                        "response_quality_score": 0.85,
+                        "attention_check_passed": True,
+                        "straight_line_response": False,
+                        "text_response_quality": 0.9
+                    }
+                }
+            ]
+        }
+    )
     response_id: Optional[str] = None
     domain: str = Field(..., description="Healthcare, University, or Business")
     survey_responses: Dict[str, float] = Field(..., description="Q1-Q22 responses (1-4 scale)")
@@ -85,6 +129,22 @@ class SurveyResponseData(BaseModel):
         return v
 
 class OrganizationInfo(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "org_id": "org_demo_001",
+                    "org_name": "Demo Org",
+                    "domain": "Business",
+                    "employee_count": 120,
+                    "founded_year": 2005,
+                    "is_public_company": False,
+                    "industry_code": "5415",
+                    "headquarters_location": "Austin, TX"
+                }
+            ]
+        }
+    )
     org_id: str
     org_name: str
     domain: str
@@ -95,6 +155,27 @@ class OrganizationInfo(BaseModel):
     headquarters_location: Optional[str] = None
 
 class BatchPredictionRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "organization_info": {
+                        "org_id": "org_demo_001",
+                        "org_name": "Demo Org",
+                        "domain": "Business",
+                        "employee_count": 120
+                    },
+                    "individual_responses": [
+                        {"response_id":"e1","domain":"Business","survey_responses":{"q1":3,"q2":3,"q3":3,"q4":3,"q5":3,"q6":3,"q7":3,"q8":3,"q9":3,"q10":3,"q11":3,"q12":3,"q13":3,"q14":3,"q15":3,"q16":3,"q17":3,"q18":3,"q19":3,"q20":3,"q21":3,"q22":3},"text_responses":{},"demographics":{"age_range":"25-34","gender_identity":"Man","tenure_range":"1-3_years","position_level":"Mid","department":"Engineering"}},
+                        {"response_id":"e2","domain":"Business","survey_responses":{ "q1":2.5,"q2":2.5,"q3":2.5,"q4":2.5,"q5":2.5,"q6":2.5,"q7":2.5,"q8":2.5,"q9":2.5,"q10":2.5,"q11":2.5,"q12":2.5,"q13":2.5,"q14":2.5,"q15":2.5,"q16":2.5,"q17":2.5,"q18":2.5,"q19":2.5,"q20":2.5,"q21":2.5,"q22":2.5},"text_responses":{},"demographics":{"age_range":"35-44","gender_identity":"Woman","tenure_range":"4-7_years","position_level":"Senior","department":"Sales"}},
+                        {"response_id":"e3","domain":"Business","survey_responses":{ "q1":3.5,"q2":3.5,"q3":3.0,"q4":3.5,"q5":3.5,"q6":3.0,"q7":3.0,"q8":3.5,"q9":3.0,"q10":3.5,"q11":3.0,"q12":3.0,"q13":3.5,"q14":3.0,"q15":3.0,"q16":3.5,"q17":3.0,"q18":3.0,"q19":3.5,"q20":3.0,"q21":3.0,"q22":3.5},"text_responses":{},"demographics":{"age_range":"45-54","gender_identity":"Non-binary","tenure_range":"8+_years","position_level":"Executive","department":"Operations"}},
+                        {"response_id":"e4","domain":"Business","survey_responses":{ "q1":2.0,"q2":2.0,"q3":2.0,"q4":2.0,"q5":2.0,"q6":2.0,"q7":2.0,"q8":2.0,"q9":2.0,"q10":2.0,"q11":2.0,"q12":2.0,"q13":2.0,"q14":2.0,"q15":2.0,"q16":2.0,"q17":2.0,"q18":2.0,"q19":2.0,"q20":2.0,"q21":2.0,"q22":2.0},"text_responses":{},"demographics":{"age_range":"18-24","gender_identity":"Man","tenure_range":"<1_year","position_level":"Entry","department":"Support"}},
+                        {"response_id":"e5","domain":"Business","survey_responses":{ "q1":3.0,"q2":2.5,"q3":2.5,"q4":3.0,"q5":3.0,"q6":2.5,"q7":2.5,"q8":3.0,"q9":2.5,"q10":3.0,"q11":3.0,"q12":2.5,"q13":3.0,"q14":2.5,"q15":2.5,"q16":2.5,"q17":3.0,"q18":3.0,"q19":3.0,"q20":3.0,"q21":2.5,"q22":3.0},"text_responses":{},"demographics":{"age_range":"25-34","gender_identity":"Prefer_not_to_say","tenure_range":"1-3_years","position_level":"Mid","department":"Engineering"}}
+                    ]
+                }
+            ]
+        }
+    )
     organization_info: OrganizationInfo
     individual_responses: List[SurveyResponseData]
     
@@ -211,6 +292,52 @@ async def pipeline_status(user: dict = Depends(get_current_user)):
         logger.error(f"Pipeline status check failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/models/info")
+async def models_info(user: dict = Depends(get_current_user)):
+    """Return loaded model information and paths"""
+    try:
+        status = get_pipeline_status()
+        return JSONResponse(content={
+            'pipeline_ready': status.get('pipeline_ready'),
+            'models_loaded': status.get('models_loaded'),
+            'model_version': status.get('model_version'),
+            'model_info': status.get('model_info')
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/models/reload")
+async def models_reload(user: dict = Depends(get_current_user)):
+    """Reload models from disk without retraining"""
+    try:
+        if "write" not in user.get("permissions", []):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        result = await ml_reload_models()
+        return JSONResponse(content=result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/scoring/info")
+async def scoring_info():
+    """Expose HSEG scoring configuration and thresholds"""
+    try:
+        return JSONResponse(content={
+            'doc_version': HSEG_SCORING.DOC_VERSION,
+            'category_config': HSEG_SCORING.CATEGORY_CONFIG,
+            'category_weights': HSEG_SCORING.CATEGORY_WEIGHTS,
+            'max_total_points': HSEG_SCORING.MAX_TOTAL_POINTS,
+            'min_total_points': HSEG_SCORING.MIN_TOTAL_POINTS,
+            'normalized_scale': {
+                'min': HSEG_SCORING.NORMALIZED_MIN,
+                'max': HSEG_SCORING.NORMALIZED_MAX
+            },
+            'thresholds_28': HSEG_SCORING.THRESHOLDS_28
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Individual prediction endpoints
 @app.post("/predict/individual", response_model=IndividualPredictionResponse)
 async def predict_individual_risk(
@@ -221,6 +348,9 @@ async def predict_individual_risk(
     try:
         # Convert Pydantic model to dict
         data_dict = response_data.dict()
+        # Ensure response_id is a non-empty string for downstream validation
+        if not data_dict.get('response_id'):
+            data_dict['response_id'] = f"ui_{uuid.uuid4().hex[:8]}"
         
         # Add user context
         data_dict['user_id'] = user.get('user_id')
@@ -232,6 +362,9 @@ async def predict_individual_risk(
         if 'error' in prediction:
             raise HTTPException(status_code=400, detail=prediction['error'])
         
+        # Coerce any missing/None response_id to a valid string for response validation
+        if not prediction.get('response_id'):
+            prediction['response_id'] = data_dict['response_id']
         return IndividualPredictionResponse(**prediction)
         
     except HTTPException:
@@ -305,8 +438,65 @@ async def predict_organizational_risk(
         
         if 'error' in org_prediction:
             raise HTTPException(status_code=400, detail=org_prediction['error'])
-        
-        return OrganizationalPredictionResponse(**org_prediction)
+
+        # Map model output to API schema
+        try:
+            overall_assessment = {
+                'org_id': request.organization_info.org_id,
+                'org_name': request.organization_info.org_name,
+                'overall_risk_tier': org_prediction.get('overall_risk_tier'),
+                'average_hseg_score': org_prediction.get('overall_hseg_score'),
+                'predicted_turnover_rate': org_prediction.get('predicted_outcomes', {}).get('predicted_turnover_rate'),
+                'total_responses': org_prediction.get('sample_size'),
+                'confidence_level': org_prediction.get('confidence_level'),
+                'benchmark_percentile': org_prediction.get('benchmark_percentile'),
+                'industry_comparison': org_prediction.get('industry_comparison'),
+                'calculated_at': org_prediction.get('calculated_at')
+            }
+
+            # Category breakdown: include mean score and risk_rate if available
+            category_breakdown = {}
+            agg_stats = org_prediction.get('aggregated_statistics', {})
+            for cid, score in org_prediction.get('category_scores', {}).items():
+                stats = (agg_stats.get('categories') or {}).get(int(cid), {})
+                category_breakdown[int(cid)] = {
+                    'score': score,
+                    'risk_rate': stats.get('risk_rate'),
+                    'mean': stats.get('mean'),
+                    'std': stats.get('std')
+                }
+
+            intervention_recommendations = org_prediction.get('intervention_priorities', [])
+
+            benchmarking = {
+                'percentile': org_prediction.get('benchmark_percentile'),
+                'industry_comparison': org_prediction.get('industry_comparison')
+            }
+
+            risk_dist = (agg_stats.get('risk_distribution') or {})
+            risk_indicators = {
+                'crisis_rate': agg_stats.get('crisis_rate'),
+                'at_risk_rate': agg_stats.get('at_risk_rate'),
+                'safe_rate': agg_stats.get('safe_rate'),
+                'risk_distribution': risk_dist
+            }
+
+            # Demographic analysis not computed here
+            response_payload = {
+                'organization_id': request.organization_info.org_id,
+                'overall_assessment': overall_assessment,
+                'category_breakdown': category_breakdown,
+                'demographic_analysis': {},
+                'intervention_recommendations': intervention_recommendations,
+                'benchmarking': benchmarking,
+                'risk_indicators': risk_indicators
+            }
+
+            return OrganizationalPredictionResponse(**response_payload)
+        except Exception as map_err:
+            logger.error(f"Mapping organizational prediction failed: {map_err}")
+            # Fallback: return raw content for debugging
+            return JSONResponse(content=org_prediction)
         
     except HTTPException:
         raise

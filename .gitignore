@@ -50,6 +50,26 @@ venv.bak/
 *.sqlite3
 database/
 
+# Node/Frontend
+frontend/node_modules/
+frontend/build/
+frontend/.cache/
+
+# Dump and artifacts
+dump/
+*.ipynb
+*.png
+*.jpg
+*.jpeg
+*.svg
+screenshots/
+images/
+
+# Environment and secrets
+.env
+.env.*
+docker/ssl/
+
 # Logs
 logs/
 *.log

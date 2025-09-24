@@ -38,6 +38,8 @@ class TextRiskClassifier:
         # Initialize tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = None
+        self.sklearn_pipeline = None  # Optional TF-IDF + LogisticRegression pipeline (.pkl)
+        self.class_thresholds = None  # Optional per-class thresholds for sklearn pipeline
         self.is_trained = False
         
         # Risk keywords for each category
@@ -352,18 +354,43 @@ class TextRiskClassifier:
             emotional_intensity = self.calculate_emotional_intensity(processed_text)
             sentiment = self.analyze_sentiment(text)
             
-            # Rule-based risk classification if model not available
-            if not self.is_trained or self.model is None:
-                category_risks = self._rule_based_classification(
-                    keywords, crisis_detection, emotional_intensity, sentiment
-                )
-            else:
-                category_risks = self._model_based_classification(processed_text)
+            # Per-category (rule-based as baseline)
+            category_risks = self._rule_based_classification(
+                keywords, crisis_detection, emotional_intensity, sentiment
+            )
+            
+            # Optional sklearn overall severity using calibrated thresholds
+            overall_from_model = None
+            if self.sklearn_pipeline is not None:
+                try:
+                    if hasattr(self.sklearn_pipeline, 'predict_proba'):
+                        proba = self.sklearn_pipeline.predict_proba([processed_text])[0]
+                        classes = list(getattr(self.sklearn_pipeline, 'classes_', []))
+                        thresholds = self.class_thresholds or {}
+                        severity_order = ['Crisis', 'High_Risk', 'Moderate_Risk', 'Low_Risk']
+                        chosen = None
+                        for cls in severity_order:
+                            if cls in classes:
+                                idx = classes.index(cls)
+                                thr = thresholds.get(cls, 0.5)
+                                if proba[idx] >= thr:
+                                    chosen = cls
+                                    break
+                        if chosen is None and classes:
+                            chosen = classes[int(proba.argmax())]
+                    else:
+                        chosen = self.sklearn_pipeline.predict([processed_text])[0]
+                    severity_map = {'Low_Risk': 0, 'Low': 0, 'Moderate_Risk': 1, 'Medium': 1, 'High_Risk': 2, 'High': 2, 'Crisis': 3, 'Critical': 3}
+                    overall_from_model = severity_map.get(str(chosen), None)
+                except Exception:
+                    overall_from_model = None
             
             # Determine overall risk level
             max_risk = max(category_risks.values())
             if crisis_detection['has_crisis_language']:
                 overall_risk = 3  # Critical
+            elif overall_from_model is not None:
+                overall_risk = int(overall_from_model)
             elif max_risk >= 0.7:
                 overall_risk = 2  # High
             elif max_risk >= 0.4:
@@ -528,16 +555,26 @@ class TextRiskClassifier:
     def load_model(self, filepath: str):
         """Load trained model"""
         try:
-            checkpoint = torch.load(filepath, map_location=self.device)
-            
-            self.model = self.create_model(num_labels=6)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            self.model.to(self.device)
-            
-            self.model_version = checkpoint.get('model_version', 'unknown')
-            self.is_trained = checkpoint.get('is_trained', True)
-            
-            print(f"Model loaded from {filepath}")
+            if filepath.endswith('.pkl'):
+                # Load sklearn pipeline payload
+                with open(filepath, 'rb') as f:
+                    payload = pickle.load(f)
+                if isinstance(payload, dict):
+                    self.sklearn_pipeline = payload.get('model', None)
+                    self.class_thresholds = payload.get('thresholds', None)
+                else:
+                    self.sklearn_pipeline = payload
+                self.model = None
+                self.is_trained = self.sklearn_pipeline is not None
+                print(f"Sklearn text model loaded from {filepath}")
+            else:
+                checkpoint = torch.load(filepath, map_location=self.device)
+                self.model = self.create_model(num_labels=6)
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+                self.model.to(self.device)
+                self.model_version = checkpoint.get('model_version', 'unknown')
+                self.is_trained = checkpoint.get('is_trained', True)
+                print(f"Transformer text model loaded from {filepath}")
         
         except Exception as e:
             print(f"Error loading model: {e}")

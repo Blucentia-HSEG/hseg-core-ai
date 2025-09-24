@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime
 import warnings
 from pathlib import Path
+from app.core import scoring as HSEG_SCORING
 
 # ML Libraries
 from sklearn.ensemble import RandomForestRegressor, VotingRegressor
@@ -39,20 +40,10 @@ class IndividualRiskPredictor:
         self.scalers = {}
         self.encoders = {}
         self.feature_names = []
-        self.category_weights = {
-            1: 3.0,  # Power_Abuse_Suppression
-            2: 2.5,  # Discrimination_Exclusion  
-            3: 2.0,  # Manipulative_Work_Culture
-            4: 3.0,  # Failure_Of_Accountability
-            5: 2.5,  # Mental_Health_Harm
-            6: 2.0   # Erosion_Voice_Autonomy
-        }
-        self.risk_thresholds = {
-            'crisis': 12.0,
-            'at_risk': 16.0,
-            'mixed': 20.0,
-            'safe': 24.0
-        }
+        # HSEG scoring configuration (centralized)
+        self.category_config = HSEG_SCORING.CATEGORY_CONFIG
+        self.category_weights = HSEG_SCORING.CATEGORY_WEIGHTS
+        self.risk_thresholds_28 = HSEG_SCORING.THRESHOLDS_28
         self.is_trained = False
     
     def extract_features(self, response_data: Dict) -> np.ndarray:
@@ -171,16 +162,18 @@ class IndividualRiskPredictor:
         
         return np.array(features).reshape(1, -1)
     
-    def create_ensemble_model(self) -> VotingRegressor:
+    def create_ensemble_model(self, weights: Optional[List[float]] = None) -> VotingRegressor:
         """Create ensemble model with XGBoost, Neural Network, and Random Forest"""
         
-        # XGBoost with optimized parameters
+        # XGBoost with tuned parameters (better generalization)
         xgb_model = xgb.XGBRegressor(
-            n_estimators=100,
-            max_depth=6,
-            learning_rate=0.1,
-            subsample=0.8,
-            colsample_bytree=0.8,
+            n_estimators=300,
+            max_depth=5,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            reg_alpha=0.0,
+            reg_lambda=1.0,
             random_state=42,
             objective='reg:squarederror'
         )
@@ -190,29 +183,60 @@ class IndividualRiskPredictor:
             hidden_layer_sizes=(128, 64, 32),
             activation='relu',
             solver='adam',
-            alpha=0.001,
+            alpha=0.0005,
             learning_rate='adaptive',
-            max_iter=500,
+            learning_rate_init=0.001,
+            early_stopping=True,
+            n_iter_no_change=20,
+            max_iter=800,
             random_state=42
         )
         
         # Random Forest for interpretability
         rf_model = RandomForestRegressor(
-            n_estimators=100,
-            max_depth=10,
-            min_samples_split=5,
-            min_samples_leaf=2,
+            n_estimators=300,
+            max_depth=None,
+            min_samples_split=4,
+            min_samples_leaf=1,
             random_state=42
         )
         
-        # Ensemble with equal weighting
+        # Ensemble with equal weighting (weights can be tuned later if needed)
         ensemble = VotingRegressor([
             ('xgb', xgb_model),
             ('nn', nn_model), 
             ('rf', rf_model)
-        ])
-        
+        ], weights=weights)
+
         return ensemble
+
+    def _estimate_ensemble_weights(self, X: np.ndarray, y: np.ndarray, n_splits: int = 3) -> List[float]:
+        """Estimate per-estimator weights via KFold CV using inverse MSE."""
+        from sklearn.model_selection import KFold
+        from sklearn.base import clone
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+        mse_sums = {'xgb': 0.0, 'nn': 0.0, 'rf': 0.0}
+        eps = 1e-6
+        for train_idx, val_idx in kf.split(X):
+            Xtr, Xval = X[train_idx], X[val_idx]
+            ytr, yval = y[train_idx], y[val_idx]
+            # Create fresh estimators
+            ens = self.create_ensemble_model()
+            base_map = {name: est for name, est in ens.estimators}
+            xgb_est = clone(base_map['xgb'])
+            nn_est = clone(base_map['nn'])
+            rf_est = clone(base_map['rf'])
+            xgb_est.fit(Xtr, ytr)
+            nn_est.fit(Xtr, ytr)
+            rf_est.fit(Xtr, ytr)
+            from sklearn.metrics import mean_squared_error
+            mse_sums['xgb'] += mean_squared_error(yval, xgb_est.predict(Xval))
+            mse_sums['nn'] += mean_squared_error(yval, nn_est.predict(Xval))
+            mse_sums['rf'] += mean_squared_error(yval, rf_est.predict(Xval))
+        inv = {k: 1.0 / (v / n_splits + eps) for k, v in mse_sums.items()}
+        weights = [inv['xgb'], inv['nn'], inv['rf']]
+        total = sum(weights)
+        return [w / total for w in weights]
     
     def prepare_training_data(self, training_responses: List[Dict]) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -276,8 +300,10 @@ class IndividualRiskPredictor:
         for cat_id in range(6):  # 6 categories
             print(f"Training model for category {cat_id + 1}...")
             
-            # Create and train ensemble
-            model = self.create_ensemble_model()
+            # Estimate ensemble weights via KFold on training fold
+            weights = self._estimate_ensemble_weights(X_train_scaled, y_train[:, cat_id])
+            # Create and train ensemble with weights
+            model = self.create_ensemble_model(weights=weights)
             model.fit(X_train_scaled, y_train[:, cat_id])
             
             # Validate
@@ -351,20 +377,28 @@ class IndividualRiskPredictor:
                 
                 category_risks[cat_id] = risk_level
             
-            # Calculate overall HSEG score (weighted average)
-            weighted_sum = sum(category_scores[cat_id] * self.category_weights[cat_id] 
-                             for cat_id in range(1, 7))
-            total_weight = sum(self.category_weights.values())
-            overall_score = weighted_sum / total_weight
+            # HSEG Comprehensive Scoring (Normalized to 28-point scale)
+            # For each category: contribution = (avg_score/4) * (num_questions * weight)
+            # Total max = 55.5; Normalized score = (total/55.5)*28
+            category_weighted_points = {}
+            total_weighted_points = 0.0
+            for cat_id, score in category_scores.items():
+                cfg = self.category_config.get(cat_id, {'weight': 2.0, 'num_questions': 3})
+                cat_max_points = cfg['num_questions'] * cfg['weight']
+                contribution = (score / 4.0) * cat_max_points
+                category_weighted_points[cat_id] = round(contribution, 3)
+                total_weighted_points += contribution
+
+            overall_score_28 = HSEG_SCORING.normalize_points_to_28(total_weighted_points)
             
             # Determine overall risk tier
-            if overall_score < self.risk_thresholds['crisis']:
+            if overall_score_28 <= self.risk_thresholds_28['crisis_max']:
                 overall_tier = "Crisis"
-            elif overall_score < self.risk_thresholds['at_risk']:
+            elif overall_score_28 <= self.risk_thresholds_28['at_risk_max']:
                 overall_tier = "At Risk"
-            elif overall_score < self.risk_thresholds['mixed']:
+            elif overall_score_28 <= self.risk_thresholds_28['mixed_max']:
                 overall_tier = "Mixed"
-            elif overall_score < self.risk_thresholds['safe']:
+            elif overall_score_28 <= self.risk_thresholds_28['safe_max']:
                 overall_tier = "Safe"
             else:
                 overall_tier = "Thriving"
@@ -379,16 +413,21 @@ class IndividualRiskPredictor:
             interventions = self._generate_interventions(category_scores, overall_tier)
             
             return {
-                'response_id': response_data.get('response_id', 'unknown'),
+                'response_id': response_data.get('response_id') or 'unknown',
                 'prediction_timestamp': datetime.now().isoformat(),
                 'model_version': self.model_version,
-                'overall_hseg_score': round(overall_score, 2),
+                'overall_hseg_score': round(overall_score_28, 2),
                 'overall_risk_tier': overall_tier,
                 'category_scores': category_scores,
                 'category_risk_levels': category_risks,
                 'confidence_score': confidence,
                 'contributing_factors': contributing_factors,
                 'recommended_interventions': interventions,
+                'scoring_breakdown': {
+                    'category_weighted_points': category_weighted_points,
+                    'total_weighted_points_55_5': round(total_weighted_points, 3),
+                    'normalized_28_point_score': round(overall_score_28, 3)
+                },
                 'feature_importance': self._get_feature_importance(),
                 'processing_metadata': {
                     'features_extracted': len(features.flatten()),
@@ -554,7 +593,7 @@ class IndividualRiskPredictor:
             'scalers': self.scalers,
             'encoders': self.encoders,
             'category_weights': self.category_weights,
-            'risk_thresholds': self.risk_thresholds,
+            'risk_thresholds_28': self.risk_thresholds_28,
             'model_version': self.model_version,
             'is_trained': self.is_trained,
             'feature_names': self.feature_names
@@ -574,7 +613,8 @@ class IndividualRiskPredictor:
         self.scalers = model_data['scalers']
         self.encoders = model_data['encoders']
         self.category_weights = model_data['category_weights']
-        self.risk_thresholds = model_data['risk_thresholds']
+        # Backward-compat: accept either key
+        self.risk_thresholds_28 = model_data.get('risk_thresholds_28', model_data.get('risk_thresholds', self.risk_thresholds_28))
         self.model_version = model_data['model_version']
         self.is_trained = model_data['is_trained']
         self.feature_names = model_data.get('feature_names', [])
@@ -588,7 +628,7 @@ class IndividualRiskPredictor:
             'is_trained': self.is_trained,
             'num_categories': len(self.models),
             'category_weights': self.category_weights,
-            'risk_thresholds': self.risk_thresholds,
+            'risk_thresholds_28': self.risk_thresholds_28,
             'feature_count': len(self.feature_names) if self.feature_names else 'Unknown'
         }
 

@@ -21,6 +21,9 @@ class OrganizationalRiskAggregator:
         self.model_path = model_path or "app/models/trained/organizational_risk_model.pkl"
         self.model_data = None
         self.is_loaded = False
+        self.risk_model = None
+        self.turnover_model = None
+        self.domain_encoder = None
 
         # Industry baselines for psychological safety
         self.industry_baselines = {
@@ -44,6 +47,10 @@ class OrganizationalRiskAggregator:
         try:
             with open(self.model_path, 'rb') as f:
                 self.model_data = joblib.load(f)
+            if isinstance(self.model_data, dict):
+                self.risk_model = self.model_data.get('risk_model')
+                self.turnover_model = self.model_data.get('turnover_model')
+                self.domain_encoder = self.model_data.get('domain_encoder')
             self.is_loaded = True
             print(f"Organizational risk model loaded successfully from {self.model_path}")
             return True
@@ -62,23 +69,26 @@ class OrganizationalRiskAggregator:
         hseg_scores = [pred.get('overall_hseg_score', 14.0) for pred in individual_predictions]
         risk_tiers = [pred.get('overall_risk_tier', 'Mixed') for pred in individual_predictions]
 
-        # Category-level aggregation
+        # Category-level aggregation (category scores are on 1.0-4.0 scale)
         category_aggregations = {}
         for category_id in range(1, 7):
             category_scores = []
             for pred in individual_predictions:
                 category_data = pred.get('category_scores', {})
-                score = category_data.get(str(category_id), 14.0)
-                category_scores.append(score)
+                score = category_data.get(str(category_id))
+                if score is None:
+                    score = category_data.get(category_id, 2.5)
+                category_scores.append(float(score))
 
             category_aggregations[category_id] = {
-                'mean': np.mean(category_scores),
-                'std': np.std(category_scores),
-                'min': np.min(category_scores),
-                'max': np.max(category_scores),
-                'p25': np.percentile(category_scores, 25),
-                'p75': np.percentile(category_scores, 75),
-                'risk_rate': sum(1 for s in category_scores if s <= 15.0) / len(category_scores)
+                'mean': float(np.mean(category_scores)),
+                'std': float(np.std(category_scores)),
+                'min': float(np.min(category_scores)),
+                'max': float(np.max(category_scores)),
+                'p25': float(np.percentile(category_scores, 25)),
+                'p75': float(np.percentile(category_scores, 75)),
+                # Risk rate: proportion at or below 2.5 (At-Risk threshold on 1-4 scale)
+                'risk_rate': sum(1 for s in category_scores if s <= 2.5) / max(1, len(category_scores))
             }
 
         # Risk tier distribution
@@ -265,30 +275,47 @@ class OrganizationalRiskAggregator:
         # Calculate overall HSEG score (weighted average)
         overall_hseg_score = aggregated_stats['overall']['mean']
 
-        # Determine risk tier based on score and distribution
-        crisis_rate = aggregated_stats.get('crisis_rate', 0.0)
-        at_risk_rate = aggregated_stats.get('at_risk_rate', 0.0)
-        safe_rate = aggregated_stats.get('safe_rate', 0.0)
+        # Optional ML-based predictions for risk tier and turnover
+        overall_risk_tier = None
+        ml_turnover = None
+        try:
+            features = self.create_organizational_features(aggregated_stats, organization_info or {})
+            X = features.reshape(1, -1)
+            if self.risk_model is not None:
+                pred = self.risk_model.predict(X)
+                overall_risk_tier = str(pred[0])
+            if self.turnover_model is not None:
+                ml_turnover = float(self.turnover_model.predict(X)[0])
+        except Exception:
+            pass
 
-        if crisis_rate > 0.3 or overall_hseg_score < 12.0:
-            overall_risk_tier = 'Crisis'
-        elif crisis_rate > 0.15 or at_risk_rate > 0.4 or overall_hseg_score < 15.0:
-            overall_risk_tier = 'At_Risk'
-        elif safe_rate > 0.6 and overall_hseg_score > 20.0:
-            overall_risk_tier = 'Safe'
-        elif safe_rate > 0.8 and overall_hseg_score > 22.0:
-            overall_risk_tier = 'Thriving'
-        else:
-            overall_risk_tier = 'Mixed'
+        # Heuristic fallback for risk tier
+        if overall_risk_tier is None:
+            crisis_rate = aggregated_stats.get('crisis_rate', 0.0)
+            at_risk_rate = aggregated_stats.get('at_risk_rate', 0.0)
+            safe_rate = aggregated_stats.get('safe_rate', 0.0)
+            if crisis_rate > 0.3 or overall_hseg_score <= 12.0:
+                overall_risk_tier = 'Crisis'
+            elif crisis_rate > 0.15 or at_risk_rate > 0.4 or overall_hseg_score <= 16.0:
+                overall_risk_tier = 'At_Risk'
+            elif overall_hseg_score <= 20.0:
+                overall_risk_tier = 'Mixed'
+            elif overall_hseg_score <= 24.0:
+                overall_risk_tier = 'Safe'
+            else:
+                overall_risk_tier = 'Thriving'
 
         # Predict organizational outcomes
         sample_size = len(individual_predictions)
         confidence_level = min(0.95, 0.5 + (sample_size - 5) * 0.02)  # Increase confidence with sample size
 
         # Predict turnover rate (inverse relationship with psychological safety)
-        base_turnover = 0.15
-        score_factor = max(0, (18.0 - overall_hseg_score) / 11.0)  # 0 to 1 scale
-        predicted_turnover_rate = base_turnover + (score_factor * 0.35)  # Max 50% turnover
+        if ml_turnover is not None:
+            predicted_turnover_rate = ml_turnover
+        else:
+            base_turnover = 0.15
+            score_factor = max(0, (18.0 - overall_hseg_score) / 11.0)  # 0 to 1 scale
+            predicted_turnover_rate = base_turnover + (score_factor * 0.35)  # Max 50% turnover
 
         # Predict legal risk
         crisis_factor = crisis_rate * 2.0
@@ -342,6 +369,17 @@ class OrganizationalRiskAggregator:
             'calculated_at': datetime.now().isoformat()
         }
 
+    # Backward-compatible alias expected by older pipeline code
+    def predict(self, individual_predictions: List[Dict], organization_info: Dict = None) -> Dict[str, Any]:
+        return self.predict_organizational_risk(individual_predictions, organization_info)
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Basic model info for status endpoints"""
+        return {
+            'is_loaded': self.is_loaded,
+            'model_path': self.model_path
+        }
+
     def generate_dashboard_data(self, organizational_assessment: Dict) -> Dict[str, Any]:
         """Generate data specifically formatted for enterprise dashboard visualization"""
 
@@ -393,14 +431,14 @@ class OrganizationalRiskAggregator:
             }
         }
 
-        # Category breakdown for radar chart
+        # Category breakdown for radar chart (category scores are 1-4)
         category_radar_data = []
         for cat_id, score in organizational_assessment['category_scores'].items():
             category_radar_data.append({
                 'category': category_names[cat_id],
                 'score': score,
-                'max_score': 28.0,
-                'normalized_score': score / 28.0 * 100
+                'max_score': 4.0,
+                'normalized_score': score / 4.0 * 100
             })
 
         # Risk distribution for pie chart
