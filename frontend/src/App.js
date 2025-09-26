@@ -43,6 +43,7 @@ function App() {
   });
 
   const [prediction, setPrediction] = useState(null);
+  const [textRiskResults, setTextRiskResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [pipelineStatus, setPipelineStatus] = useState(null);
@@ -57,6 +58,18 @@ function App() {
   const [jsonFileName, setJsonFileName] = useState('');
   const [jsonShowEditor, setJsonShowEditor] = useState(true);
   const [jsonShowRawResult, setJsonShowRawResult] = useState(false);
+
+  // Text classification tool state
+  const [textClassificationData, setTextClassificationData] = useState({
+    q23: '',
+    q24: '',
+    q25: ''
+  });
+  const [textClassificationFiles, setTextClassificationFiles] = useState([]);
+  const [textClassificationResult, setTextClassificationResult] = useState(null);
+  const [textClassificationError, setTextClassificationError] = useState(null);
+  const [textClassificationLoading, setTextClassificationLoading] = useState(false);
+  const [textInputMethod, setTextInputMethod] = useState('manual'); // 'manual', 'file', 'sample'
 
   const questions = [
     "I feel safe speaking up about workplace issues",
@@ -93,19 +106,97 @@ function App() {
     }));
   };
 
-  const fillSampleInputs = () => {
-    const base = Object.fromEntries(Array.from({ length: 22 }, (_, i) => [`q${i + 1}`, 3]));
-    // Add some variation to simulate mixed responses
-    base.q3 = 2; base.q11 = 2; base.q21 = 2; base.q15 = 2; base.q9 = 2;
+  const fillSampleInputs = (sampleType = 'default') => {
+    const samples = {
+      default: {
+        responses: Object.fromEntries(Array.from({ length: 22 }, (_, i) => [`q${i + 1}`, 3])),
+        textResponses: {
+          q23: 'Improve accountability in handling reported issues; share outcomes clearly.',
+          q24: 'Stress rises during deadlines; leadership communication sometimes adds pressure.',
+          q25: 'We do peer mentoring very well and share knowledge openly.'
+        },
+        demographics: { age_range: '25-34', gender_identity: 'Prefer_not_to_say', position_level: 'Mid' }
+      },
+      high_risk: {
+        responses: { q1: 1, q2: 1, q3: 1, q4: 2, q5: 1, q6: 2, q7: 1, q8: 2, q9: 1, q10: 2, q11: 1, q12: 1, q13: 1, q14: 2, q15: 1, q16: 1, q17: 1, q18: 2, q19: 1, q20: 1, q21: 1, q22: 2 },
+        textResponses: {
+          q23: 'Management needs to stop the harassment and retaliation. People are afraid to speak up because of consequences.',
+          q24: 'Work is causing me severe anxiety and panic attacks. The toxic environment is destroying my mental health.',
+          q25: 'There are no real strengths. The workplace culture is hostile and unsupportive.'
+        },
+        demographics: { age_range: '35-44', gender_identity: 'Woman', position_level: 'Entry' }
+      },
+      positive: {
+        responses: Object.fromEntries(Array.from({ length: 22 }, (_, i) => [`q${i + 1}`, 4])),
+        textResponses: {
+          q23: 'Continue the excellent leadership development and transparent communication practices.',
+          q24: 'Work is challenging but rewarding. Great support systems help maintain work-life balance.',
+          q25: 'Outstanding team collaboration, supportive management, and genuine care for employee wellbeing.'
+        },
+        demographics: { age_range: '25-34', gender_identity: 'Non_binary', position_level: 'Senior' }
+      }
+    };
+
+    const selectedSample = samples[sampleType];
+    // Add some variation to default sample
+    if (sampleType === 'default') {
+      selectedSample.responses.q3 = 2;
+      selectedSample.responses.q11 = 2;
+      selectedSample.responses.q21 = 2;
+      selectedSample.responses.q15 = 2;
+      selectedSample.responses.q9 = 2;
+    }
+
     setSurveyData(prev => ({
       ...prev,
-      survey_responses: base,
-      text_responses: {
-        q23: 'Improve accountability in handling reported issues; share outcomes clearly.',
-        q24: 'Stress rises during deadlines; leadership communication sometimes adds pressure.',
-        q25: 'We do peer mentoring very well and share knowledge openly.'
-      }
+      survey_responses: selectedSample.responses,
+      text_responses: selectedSample.textResponses,
+      demographics: selectedSample.demographics
     }));
+  };
+
+  // JSON sample data functions
+  const loadJsonSample = (sampleType) => {
+    const samples = {
+      individual_high_risk: {
+        response_id: "sample_001",
+        domain: "Healthcare",
+        survey_responses: { q1: 1, q2: 1, q3: 1, q4: 2, q5: 1, q6: 2, q7: 1, q8: 2, q9: 1, q10: 2, q11: 1, q12: 1, q13: 1, q14: 2, q15: 1, q16: 1, q17: 1, q18: 2, q19: 1, q20: 1, q21: 1, q22: 2 },
+        demographics: { age_range: "35-44", gender_identity: "Woman", position_level: "Entry" },
+        text_responses: {
+          q23: "Need to address the hostile work environment and harassment from supervisors immediately.",
+          q24: "Experiencing severe anxiety and panic attacks due to workplace stress and toxic culture.",
+          q25: "No real strengths. Management protects perpetrators and ignores victim complaints."
+        }
+      },
+      individual_positive: {
+        response_id: "sample_002",
+        domain: "Business",
+        survey_responses: Object.fromEntries(Array.from({ length: 22 }, (_, i) => [`q${i + 1}`, 4])),
+        demographics: { age_range: "25-34", gender_identity: "Non_binary", position_level: "Senior" },
+        text_responses: {
+          q23: "Continue excellent transparent leadership and employee development programs.",
+          q24: "Work is challenging but rewarding with great support systems and work-life balance.",
+          q25: "Outstanding collaboration, supportive management, genuine care for employee wellbeing."
+        }
+      },
+      organizational: {
+        organization_info: {
+          org_id: "org_sample_001",
+          org_name: "Sample Healthcare System",
+          domain: "Healthcare",
+          employee_count: 1250
+        },
+        individual_responses: [
+          { response_id: "emp_001", overall_hseg_score: 8.5, overall_risk_tier: "Crisis", category_scores: {1: 1.2, 2: 1.8, 3: 2.1, 4: 1.5, 5: 1.3, 6: 1.6} },
+          { response_id: "emp_002", overall_hseg_score: 15.2, overall_risk_tier: "At_Risk", category_scores: {1: 2.3, 2: 2.8, 3: 2.9, 4: 2.1, 5: 2.7, 6: 2.4} },
+          { response_id: "emp_003", overall_hseg_score: 22.1, overall_risk_tier: "Safe", category_scores: {1: 3.4, 2: 3.8, 3: 3.6, 4: 3.9, 5: 3.7, 6: 3.7} }
+        ]
+      }
+    };
+
+    setJsonInput(JSON.stringify(samples[sampleType], null, 2));
+    setJsonShowEditor(true);
   };
 
   const resetInputs = () => {
@@ -129,10 +220,40 @@ function App() {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    setPrediction(null);
+    setTextRiskResults(null);
 
     try {
-      const response = await axios.post(`${API_BASE_URL}/predict/individual`, surveyData);
-      setPrediction(response.data);
+      // Step 1: Get individual prediction (Q1-Q22 + demographics)
+      const individualResponse = await axios.post(`${API_BASE_URL}/predict/individual`, surveyData);
+      setPrediction(individualResponse.data);
+
+      // Step 2: Get text classification for Q23-Q25
+      const combinedText = [
+        surveyData.text_responses.q23,
+        surveyData.text_responses.q24,
+        surveyData.text_responses.q25
+      ].filter(t => t && t.trim()).join(' ');
+
+      if (combinedText.trim()) {
+        // Create FormData for text classification API
+        const formData = new FormData();
+        const textBlob = new Blob([combinedText], { type: 'text/plain' });
+        formData.append('file', textBlob, 'survey_text_responses.txt');
+
+        const textResponse = await fetch(`${API_BASE_URL}/predict/communication_risk`, {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer test-token',
+          },
+          body: formData,
+        });
+
+        if (textResponse.ok) {
+          const textResults = await textResponse.json();
+          setTextRiskResults(textResults);
+        }
+      }
     } catch (error) {
       console.error('Prediction failed:', error);
       const detail = error.response?.data?.detail || error.response?.data?.error || error.message;
@@ -201,6 +322,123 @@ function App() {
     }
   };
 
+  // Text classification functions
+  const loadSampleTextResponses = (sampleType) => {
+    const samples = {
+      harassment: {
+        q23: "Management needs to address the hostile work environment and inappropriate behavior from supervisors. There should be better reporting mechanisms.",
+        q24: "The constant harassment has caused me severe anxiety and panic attacks. I'm having trouble sleeping and my mental health is deteriorating.",
+        q25: "Some colleagues are supportive, but many are afraid to speak up due to fear of retaliation from management."
+      },
+      crisis: {
+        q23: "The workplace needs immediate intervention. The toxic culture and lack of accountability is pushing people to their breaking point.",
+        q24: "I'm experiencing thoughts of self-harm due to workplace stress. The constant pressure and public humiliation have destroyed my confidence.",
+        q25: "There's no real support system. People are struggling but management doesn't care about employee wellbeing."
+      },
+      positive: {
+        q23: "Continue fostering the open communication culture and transparent decision-making processes that we have now.",
+        q24: "Work is challenging but manageable. The support from leadership and colleagues helps maintain good mental health.",
+        q25: "Great team collaboration, excellent work-life balance, and leadership that genuinely cares about employee development."
+      }
+    };
+    setTextClassificationData(samples[sampleType]);
+    setTextInputMethod('manual');
+  };
+
+  const handleTextClassificationFiles = async (e) => {
+    setTextClassificationError(null);
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+
+    const processedFiles = [];
+    for (const file of files) {
+      try {
+        let content = '';
+        if (file.type === 'application/json' || file.name.endsWith('.json')) {
+          const text = await file.text();
+          const jsonData = JSON.parse(text);
+          // Extract Q23, Q24, Q25 from JSON
+          content = {
+            q23: jsonData.text_responses?.q23 || jsonData.q23 || '',
+            q24: jsonData.text_responses?.q24 || jsonData.q24 || '',
+            q25: jsonData.text_responses?.q25 || jsonData.q25 || ''
+          };
+        } else if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+          const text = await file.text();
+          // Assume single text applies to all three questions
+          content = { q23: text, q24: '', q25: '' };
+        } else {
+          throw new Error('Unsupported file type. Please upload .txt, .json, or .pdf files');
+        }
+        processedFiles.push({ name: file.name, content });
+      } catch (err) {
+        setTextClassificationError(`Error processing ${file.name}: ${err.message}`);
+        return;
+      }
+    }
+
+    setTextClassificationFiles(processedFiles);
+    if (processedFiles.length === 1) {
+      setTextClassificationData(processedFiles[0].content);
+    }
+    setTextInputMethod('file');
+  };
+
+  const submitTextClassification = async () => {
+    setTextClassificationLoading(true);
+    setTextClassificationError(null);
+    setTextClassificationResult(null);
+
+    try {
+      let textToAnalyze = '';
+
+      if (textInputMethod === 'file' && textClassificationFiles.length > 0) {
+        // Process multiple files or single file
+        const allTexts = textClassificationFiles.map(file =>
+          [file.content.q23, file.content.q24, file.content.q25].filter(t => t.trim()).join(' ')
+        );
+        textToAnalyze = allTexts.join(' ');
+      } else {
+        // Manual input - combine Q23, Q24, Q25
+        textToAnalyze = [
+          textClassificationData.q23,
+          textClassificationData.q24,
+          textClassificationData.q25
+        ].filter(t => t.trim()).join(' ');
+      }
+
+      if (!textToAnalyze.trim()) {
+        setTextClassificationError('Please provide text content to analyze');
+        return;
+      }
+
+      // Create FormData for API call
+      const formData = new FormData();
+      const textBlob = new Blob([textToAnalyze], { type: 'text/plain' });
+      formData.append('file', textBlob, 'combined_responses.txt');
+
+      const response = await fetch(`${API_BASE_URL}/predict/communication_risk`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer test-token',
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || errorData.error || 'Text classification failed');
+      }
+
+      const result = await response.json();
+      setTextClassificationResult(result);
+    } catch (err) {
+      setTextClassificationError(err.message);
+    } finally {
+      setTextClassificationLoading(false);
+    }
+  };
+
   const getRiskColor = (tier) => {
     const colors = {
       'Crisis': '#d32f2f',
@@ -249,19 +487,19 @@ function App() {
   };
 
   return (
-    <Container maxWidth="lg" sx={{ py: 4 }}>
-      <Typography variant="h3" component="h1" gutterBottom align="center" color="primary">
-        HSEG Workplace Safety Assessment
-      </Typography>
+    <div>
+      {/* Page Header */}
+      <div className="page-header">
+        <h1>🏢 Blucentia Culture Intelligence Platform</h1>
+        <p>Advanced AI-Powered Psychological Safety Assessment</p>
+      </div>
 
-      <Typography variant="subtitle1" gutterBottom align="center" color="textSecondary" sx={{ mb: 4 }}>
-        Psychological Safety and Risk Assessment Tool
-      </Typography>
+      <Container maxWidth="xl" className="main-container">
 
       <Grid container spacing={4}>
         {/* JSON Prediction Tool */}
-        <Grid item xs={12}>
-          <Paper elevation={2} sx={{ p: 2 }} className="enterprise-card">
+        <Grid item xs={12} className="tools-section">
+          <Paper elevation={2} sx={{ p: 2.5 }} className="enterprise-card">
             <Typography variant="h5" gutterBottom className="section-header">JSON Prediction Tool</Typography>
             <Typography variant="body2" color="textSecondary" sx={{ mb: 2 }}>
               Paste JSON or upload a .json file, then select an endpoint to predict.
@@ -279,8 +517,11 @@ function App() {
                     value={jsonInput}
                     onChange={(e) => setJsonInput(e.target.value)}
                     multiline
-                    minRows={6}
+                    minRows={4}
+                    maxRows={8}
                     fullWidth
+                    className="json-input-field"
+                    size="small"
                   />
                 )}
               </Grid>
@@ -308,6 +549,27 @@ function App() {
                     Clear JSON
                   </Button>
                 </Box>
+
+                {/* Sample Data Options */}
+                <Typography variant="subtitle2" sx={{ mb: 1, mt: 2 }}>Sample Data:</Typography>
+                <Box display="flex" gap={1} flexWrap="wrap" sx={{ mb: 2 }}>
+                  {jsonEndpoint === 'individual' && (
+                    <>
+                      <Button onClick={() => loadJsonSample('individual_high_risk')} variant="text" size="small" color="error">
+                        High Risk Individual
+                      </Button>
+                      <Button onClick={() => loadJsonSample('individual_positive')} variant="text" size="small" color="success">
+                        Positive Individual
+                      </Button>
+                    </>
+                  )}
+                  {jsonEndpoint === 'organizational' && (
+                    <Button onClick={() => loadJsonSample('organizational')} variant="text" size="small" color="primary">
+                      Organization Sample
+                    </Button>
+                  )}
+                </Box>
+
                 <Button variant="contained" onClick={submitJsonPrediction} fullWidth>
                   Predict from JSON
                 </Button>
@@ -518,6 +780,306 @@ function App() {
             )}
           </Paper>
         </Grid>
+
+        {/* Text Classification Tool */}
+        <Grid item xs={12} className="tools-section">
+          <Paper elevation={2} sx={{ p: 2.5 }} className="enterprise-card">
+            <Typography variant="h5" gutterBottom className="section-header">
+              Text Classification Tool
+            </Typography>
+            <Typography variant="body2" color="textSecondary" sx={{ mb: 2 }}>
+              Analyze workplace feedback text responses using Zero-Shot Classification. Upload files or enter responses manually.
+            </Typography>
+
+            {/* Input Method Selection */}
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="subtitle2" gutterBottom>Input Method:</Typography>
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }}>
+                <Button
+                  variant={textInputMethod === 'manual' ? 'contained' : 'outlined'}
+                  size="small"
+                  onClick={() => setTextInputMethod('manual')}
+                >
+                  Manual Input
+                </Button>
+                <Button
+                  variant={textInputMethod === 'file' ? 'contained' : 'outlined'}
+                  size="small"
+                  onClick={() => setTextInputMethod('file')}
+                >
+                  File Upload
+                </Button>
+                <Button
+                  variant={textInputMethod === 'sample' ? 'contained' : 'outlined'}
+                  size="small"
+                  onClick={() => setTextInputMethod('sample')}
+                >
+                  Sample Data
+                </Button>
+              </Box>
+            </Box>
+
+            <Grid container spacing={2}>
+              <Grid item xs={12} md={8}>
+                {/* Sample Data Selection */}
+                {textInputMethod === 'sample' && (
+                  <Box sx={{ mb: 2 }}>
+                    <Typography variant="subtitle2" gutterBottom>Choose Sample:</Typography>
+                    <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                      <Button
+                        variant="contained"
+                        color="error"
+                        size="small"
+                        onClick={() => loadSampleTextResponses('harassment')}
+                      >
+                        🚨 Workplace Harassment
+                      </Button>
+                      <Button
+                        variant="contained"
+                        color="secondary"
+                        size="small"
+                        onClick={() => loadSampleTextResponses('crisis')}
+                      >
+                        ⚠️ Mental Health Crisis
+                      </Button>
+                      <Button
+                        variant="contained"
+                        color="success"
+                        size="small"
+                        onClick={() => loadSampleTextResponses('positive')}
+                      >
+                        ✅ Positive Feedback
+                      </Button>
+                    </Box>
+                  </Box>
+                )}
+
+                {/* Manual Input */}
+                {(textInputMethod === 'manual' || textInputMethod === 'sample') && (
+                  <Box>
+                    <TextField
+                      fullWidth
+                      multiline
+                      minRows={2}
+                      maxRows={4}
+                      label="Q23: What would you change about your workplace?"
+                      value={textClassificationData.q23}
+                      onChange={(e) => setTextClassificationData({
+                        ...textClassificationData,
+                        q23: e.target.value
+                      })}
+                      className="text-classification-input"
+                      size="small"
+                      sx={{ mb: 2 }}
+                    />
+                    <TextField
+                      fullWidth
+                      multiline
+                      minRows={2}
+                      maxRows={4}
+                      label="Q24: How does work impact your mental health?"
+                      value={textClassificationData.q24}
+                      onChange={(e) => setTextClassificationData({
+                        ...textClassificationData,
+                        q24: e.target.value
+                      })}
+                      className="text-classification-input"
+                      size="small"
+                      sx={{ mb: 2 }}
+                    />
+                    <TextField
+                      fullWidth
+                      multiline
+                      minRows={2}
+                      maxRows={4}
+                      label="Q25: What does your workplace do well?"
+                      value={textClassificationData.q25}
+                      onChange={(e) => setTextClassificationData({
+                        ...textClassificationData,
+                        q25: e.target.value
+                      })}
+                      className="text-classification-input"
+                      size="small"
+                      sx={{ mb: 2 }}
+                    />
+                  </Box>
+                )}
+
+                {/* File Upload */}
+                {textInputMethod === 'file' && (
+                  <Box>
+                    <Button variant="outlined" component="label" fullWidth sx={{ mb: 2 }}>
+                      Upload Files (.txt, .json, .pdf)
+                      <input
+                        hidden
+                        type="file"
+                        multiple
+                        accept=".txt,.json,.pdf,application/json,text/plain"
+                        onChange={handleTextClassificationFiles}
+                      />
+                    </Button>
+                    {textClassificationFiles.length > 0 && (
+                      <Box sx={{ mb: 2 }}>
+                        <Typography variant="subtitle2">Uploaded Files:</Typography>
+                        {textClassificationFiles.map((file, index) => (
+                          <Chip
+                            key={index}
+                            label={`${file.name} (${Object.values(file.content).filter(t => t.trim()).length} fields)`}
+                            color="primary"
+                            size="small"
+                            sx={{ mr: 1, mb: 1 }}
+                          />
+                        ))}
+                      </Box>
+                    )}
+                  </Box>
+                )}
+
+                {/* Error Display */}
+                {textClassificationError && (
+                  <Alert severity="error" sx={{ mb: 2 }}>
+                    {textClassificationError}
+                  </Alert>
+                )}
+
+                {/* Results Display */}
+                {textClassificationResult && (
+                  <Box sx={{ mt: 2 }}>
+                    <Typography variant="h6" gutterBottom>Classification Results</Typography>
+
+                    {/* Processing Info */}
+                    <Box sx={{ mb: 2, p: 1, bgcolor: '#f5f5f5', borderRadius: 1 }}>
+                      <Typography variant="caption" color="textSecondary">
+                        Model: {textClassificationResult.model_name} |
+                        Processing Time: {textClassificationResult.processing_time_ms?.toFixed(0)}ms
+                      </Typography>
+                    </Box>
+
+                    {/* HSEG Risk Analysis */}
+                    <Box sx={{ mb: 2 }}>
+                      <Typography variant="subtitle1" gutterBottom color="error">
+                        🏢 Organizational Risk Categories (HSEG Framework)
+                      </Typography>
+                      {textClassificationResult.hseg_risk_analysis?.map((risk, index) => (
+                        <Box key={index} sx={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          p: 1,
+                          mb: 1,
+                          bgcolor: '#f8f9fa',
+                          borderRadius: 1,
+                          borderLeft: `4px solid ${risk.score >= 0.7 ? '#d32f2f' : risk.score >= 0.5 ? '#ff9800' : '#4caf50'}`
+                        }}>
+                          <Typography variant="body2">
+                            <strong>{risk.label}</strong>
+                          </Typography>
+                          <Chip
+                            label={`${(risk.score * 100).toFixed(1)}%`}
+                            color={risk.score >= 0.7 ? 'error' : risk.score >= 0.5 ? 'warning' : 'success'}
+                            size="small"
+                          />
+                        </Box>
+                      ))}
+                    </Box>
+
+                    {/* Individual Distress Analysis */}
+                    <Box sx={{ mb: 2 }}>
+                      <Typography variant="subtitle1" gutterBottom color="secondary">
+                        👤 Individual Distress Assessment
+                      </Typography>
+                      {textClassificationResult.individual_distress_analysis?.map((distress, index) => (
+                        <Box key={index} sx={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          p: 1,
+                          mb: 1,
+                          bgcolor: '#f8f9fa',
+                          borderRadius: 1,
+                          borderLeft: `4px solid ${distress.score >= 0.7 ? '#d32f2f' : distress.score >= 0.5 ? '#ff9800' : '#4caf50'}`
+                        }}>
+                          <Typography variant="body2">
+                            <strong>{distress.label}</strong>
+                          </Typography>
+                          <Chip
+                            label={`${(distress.score * 100).toFixed(1)}%`}
+                            color={distress.score >= 0.7 ? 'error' : distress.score >= 0.5 ? 'warning' : 'success'}
+                            size="small"
+                          />
+                        </Box>
+                      ))}
+                    </Box>
+
+                    {/* Crisis Alert */}
+                    {textClassificationResult.individual_distress_analysis?.find(d =>
+                      d.label.includes('self-harm') && d.score > 0.5
+                    ) && (
+                      <Alert severity="error" sx={{ mb: 2 }}>
+                        <strong>⚠️ CRISIS ALERT ⚠️</strong><br />
+                        High probability of self-harm ideation detected. Immediate intervention recommended.
+                      </Alert>
+                    )}
+                  </Box>
+                )}
+              </Grid>
+
+              <Grid item xs={12} md={4}>
+                <Box>
+                  <Typography variant="subtitle2" gutterBottom>Analysis Options:</Typography>
+                  <FormControl fullWidth sx={{ mb: 2 }}>
+                    <InputLabel>Analysis Type</InputLabel>
+                    <Select value="communication_risk" label="Analysis Type">
+                      <MenuItem value="communication_risk">Communication Risk (Zero-Shot)</MenuItem>
+                    </Select>
+                  </FormControl>
+
+                  <Button
+                    variant="contained"
+                    fullWidth
+                    onClick={submitTextClassification}
+                    disabled={textClassificationLoading}
+                    sx={{ mb: 2 }}
+                  >
+                    {textClassificationLoading ? (
+                      <>
+                        <CircularProgress size={16} sx={{ mr: 1 }} />
+                        Analyzing...
+                      </>
+                    ) : (
+                      '🔍 Classify Text'
+                    )}
+                  </Button>
+
+                  <Button
+                    variant="text"
+                    fullWidth
+                    onClick={() => {
+                      setTextClassificationData({ q23: '', q24: '', q25: '' });
+                      setTextClassificationFiles([]);
+                      setTextClassificationResult(null);
+                      setTextClassificationError(null);
+                    }}
+                  >
+                    Clear All
+                  </Button>
+
+                  {/* Info Box */}
+                  <Box sx={{ mt: 2, p: 2, bgcolor: '#e3f2fd', borderRadius: 1 }}>
+                    <Typography variant="caption">
+                      <strong>How it works:</strong><br />
+                      • Combines Q23, Q24, Q25 responses<br />
+                      • Uses Facebook BART-large-mnli model<br />
+                      • Two-step analysis: Organizational + Individual<br />
+                      • Real-time zero-shot classification
+                    </Typography>
+                  </Box>
+                </Box>
+              </Grid>
+            </Grid>
+          </Paper>
+        </Grid>
+
         {/* System Status */}
         <Grid item xs={12}>
           <Paper elevation={1} sx={{ p: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} className="enterprise-card">
@@ -560,8 +1122,8 @@ function App() {
           </Paper>
         </Grid>
         {/* Survey Form */}
-        <Grid item xs={12} md={6}>
-          <Paper elevation={3} sx={{ p: 3 }} className="enterprise-card">
+        <Grid item xs={12} md={6} className="tools-section">
+          <Paper elevation={3} sx={{ p: 2.5 }} className="enterprise-card playground-section">
             <Typography variant="h5" gutterBottom className="section-header">
               Survey Playground
             </Typography>
@@ -656,33 +1218,63 @@ function App() {
                 <TextField
                   fullWidth
                   multiline
-                  rows={3}
+                  minRows={2}
+                  maxRows={4}
                   label="What would you change about your workplace?"
                   value={surveyData.text_responses.q23}
                   onChange={(e) => setSurveyData({
                     ...surveyData,
                     text_responses: {...surveyData.text_responses, q23: e.target.value}
                   })}
+                  className="survey-text-input"
+                  size="small"
                   sx={{ mb: 2 }}
                 />
 
                 <TextField
                   fullWidth
                   multiline
-                  rows={3}
+                  minRows={2}
+                  maxRows={4}
                   label="How does work impact your mental health?"
                   value={surveyData.text_responses.q24}
                   onChange={(e) => setSurveyData({
                     ...surveyData,
                     text_responses: {...surveyData.text_responses, q24: e.target.value}
                   })}
+                  className="survey-text-input"
+                  size="small"
+                  sx={{ mb: 2 }}
+                />
+
+                <TextField
+                  fullWidth
+                  multiline
+                  minRows={2}
+                  maxRows={4}
+                  label="What does your workplace do well?"
+                  value={surveyData.text_responses.q25}
+                  onChange={(e) => setSurveyData({
+                    ...surveyData,
+                    text_responses: {...surveyData.text_responses, q25: e.target.value}
+                  })}
+                  className="survey-text-input"
+                  size="small"
                   sx={{ mb: 2 }}
                 />
               </Box>
 
-              <Box display="flex" gap={2}>
-              <Button onClick={fillSampleInputs} variant="outlined">Use Sample Inputs</Button>
-              <Button onClick={resetInputs} variant="text">Reset</Button>
+              <Box display="flex" gap={1} flexWrap="wrap">
+                <Button onClick={() => fillSampleInputs('default')} variant="outlined" size="small">
+                  Default Sample
+                </Button>
+                <Button onClick={() => fillSampleInputs('high_risk')} variant="outlined" size="small" color="error">
+                  High Risk Sample
+                </Button>
+                <Button onClick={() => fillSampleInputs('positive')} variant="outlined" size="small" color="success">
+                  Positive Sample
+                </Button>
+                <Button onClick={resetInputs} variant="text" size="small">Reset</Button>
               </Box>
               <Button
                 type="submit"
@@ -700,7 +1292,7 @@ function App() {
 
         {/* Results */}
         <Grid item xs={12} md={6}>
-          <Paper elevation={3} sx={{ p: 3 }} className="enterprise-card">
+          <Paper elevation={3} sx={{ p: 2.5 }} className="enterprise-card assessment-results">
             <Typography variant="h5" gutterBottom className="section-header">
               Assessment Results
             </Typography>
@@ -819,8 +1411,88 @@ function App() {
                     ))}
                   </Box>
                 )}
-                {/* Text Risk Analysis (if available) */}
-                {prediction.text_risk_analysis && (
+                {/* Zero-Shot Text Classification Results (Q23-Q25) */}
+                {textRiskResults && (
+                  <Box sx={{ mt: 3 }}>
+                    <Typography variant="h6" gutterBottom>Zero-Shot Text Classification (Q23-Q25)</Typography>
+
+                    {/* Processing Info */}
+                    <Box sx={{ mb: 2, p: 1, bgcolor: '#f5f5f5', borderRadius: 1 }}>
+                      <Typography variant="caption" color="textSecondary">
+                        Model: {textRiskResults.model_name} | Processing Time: {textRiskResults.processing_time_ms?.toFixed(0)}ms
+                      </Typography>
+                    </Box>
+
+                    {/* HSEG Risk Analysis from Text */}
+                    <Box sx={{ mb: 2 }}>
+                      <Typography variant="subtitle1" gutterBottom color="error">
+                        🏢 Organizational Risks Detected in Text
+                      </Typography>
+                      {textRiskResults.hseg_risk_analysis?.slice(0, 3).map((risk, index) => (
+                        <Box key={index} sx={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          p: 1,
+                          mb: 1,
+                          bgcolor: '#f8f9fa',
+                          borderRadius: 1,
+                          borderLeft: `4px solid ${risk.score >= 0.7 ? '#d32f2f' : risk.score >= 0.5 ? '#ff9800' : '#4caf50'}`
+                        }}>
+                          <Typography variant="body2">
+                            <strong>{risk.label}</strong>
+                          </Typography>
+                          <Chip
+                            label={`${(risk.score * 100).toFixed(1)}%`}
+                            color={risk.score >= 0.7 ? 'error' : risk.score >= 0.5 ? 'warning' : 'success'}
+                            size="small"
+                          />
+                        </Box>
+                      ))}
+                    </Box>
+
+                    {/* Individual Distress from Text */}
+                    <Box sx={{ mb: 2 }}>
+                      <Typography variant="subtitle1" gutterBottom color="secondary">
+                        👤 Individual Distress Detected in Text
+                      </Typography>
+                      {textRiskResults.individual_distress_analysis?.map((distress, index) => (
+                        <Box key={index} sx={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          p: 1,
+                          mb: 1,
+                          bgcolor: '#f8f9fa',
+                          borderRadius: 1,
+                          borderLeft: `4px solid ${distress.score >= 0.7 ? '#d32f2f' : distress.score >= 0.5 ? '#ff9800' : '#4caf50'}`
+                        }}>
+                          <Typography variant="body2">
+                            <strong>{distress.label}</strong>
+                          </Typography>
+                          <Chip
+                            label={`${(distress.score * 100).toFixed(1)}%`}
+                            color={distress.score >= 0.7 ? 'error' : distress.score >= 0.5 ? 'warning' : 'success'}
+                            size="small"
+                          />
+                        </Box>
+                      ))}
+                    </Box>
+
+                    {/* Crisis Alert */}
+                    {textRiskResults.individual_distress_analysis?.find(d =>
+                      d.label.includes('self-harm') && d.score > 0.5
+                    ) && (
+                      <Alert severity="error">
+                        <strong>⚠️ CRISIS ALERT ⚠️</strong><br />
+                        High probability of self-harm ideation detected in text responses. Immediate intervention recommended.
+                      </Alert>
+                    )}
+                  </Box>
+                )}
+
+                {/* Legacy Text Risk Analysis (if available from individual prediction) */}
+                {prediction.text_risk_analysis && !textRiskResults && (
                   <Box sx={{ mt: 3 }}>
                     <Typography variant="h6" gutterBottom>Text Risk Analysis</Typography>
                     <Alert severity={prediction.text_risk_analysis.crisis_detection?.has_crisis_language ? 'error' : 'info'} sx={{ mb: 2 }}>
@@ -839,7 +1511,8 @@ function App() {
           </Paper>
         </Grid>
       </Grid>
-    </Container>
+      </Container>
+    </div>
   );
 }
 

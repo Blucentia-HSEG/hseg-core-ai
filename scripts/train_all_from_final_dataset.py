@@ -23,7 +23,9 @@ from sklearn.metrics import accuracy_score, classification_report, mean_squared_
 from sklearn.preprocessing import LabelEncoder
 import lightgbm as lgb
 
-from app.models.individual_risk_model import IndividualRiskPredictor\nimport glob\n\n
+from app.models.individual_risk_model import IndividualRiskPredictor
+import glob
+
 DATA_PATH = 'data/hseg_final_dataset.csv'
 OUT_DIR = 'app/models/trained'
 

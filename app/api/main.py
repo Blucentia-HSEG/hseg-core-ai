@@ -36,13 +36,18 @@ from sqlalchemy.orm import Session
 from app.core.ml_pipeline import (
     initialize_ml_pipeline, predict_individual, predict_organization,
     process_campaign, get_pipeline_status, health_check as ml_health_check,
-    reload_models as ml_reload_models
+    reload_models as ml_reload_models, analyze_text_risk
 )
 from app.core import scoring as HSEG_SCORING
+import pytesseract
+from pdf2image import convert_from_bytes
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+class CommunicationRiskRequest(BaseModel):
+    text: str
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -214,6 +219,16 @@ class HealthCheckResponse(BaseModel):
     ml_pipeline: Dict[str, Any]
     api_version: str
 
+class AnalysisResult(BaseModel):
+    label: str
+    score: float
+
+class TwoStepTextAnalysisResponse(BaseModel):
+    hseg_risk_analysis: List[AnalysisResult]
+    individual_distress_analysis: List[AnalysisResult]
+    processing_time_ms: float
+    model_name: str
+
 # Authentication dependency (mock - implement proper auth for production)
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     # Mock authentication - replace with real implementation
@@ -337,6 +352,40 @@ async def scoring_info():
         })
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/predict/communication_risk", response_model=TwoStepTextAnalysisResponse)
+async def predict_communication_risk(
+    request: Optional[CommunicationRiskRequest] = None,
+    file: Optional[UploadFile] = File(None),
+    user: dict = Depends(get_current_user)
+):
+    """Analyze text for communication risk from text or document"""
+    try:
+        text_to_analyze = ""
+        if file:
+            if file.content_type == "application/pdf":
+                images = convert_from_bytes(await file.read())
+                for image in images:
+                    text_to_analyze += pytesseract.image_to_string(image)
+            else:
+                text_to_analyze = (await file.read()).decode("utf-8")
+        elif request and request.text:
+            text_to_analyze = request.text
+        else:
+            raise HTTPException(status_code=400, detail="No text or file provided")
+
+        if not text_to_analyze.strip():
+            raise HTTPException(status_code=400, detail="The provided text is empty")
+
+        analysis = await analyze_text_risk(text_to_analyze)
+        return analysis
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Communication risk prediction failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # Individual prediction endpoints
 @app.post("/predict/individual", response_model=IndividualPredictionResponse)

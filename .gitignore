@@ -45,15 +45,17 @@ venv.bak/
 .ipynb_checkpoints
 
 # Database files
-*.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
-database/
 
 # Node/Frontend
-frontend/node_modules/
-frontend/build/
-frontend/.cache/
+node_modules/
+build/
+.cache/
+*.lock
+package-lock.json
 
 # Dump and artifacts
 dump/
@@ -64,6 +66,8 @@ dump/
 *.svg
 screenshots/
 images/
+# Keep organized dump structure
+!dump/.gitkeep
 
 # Environment and secrets
 .env

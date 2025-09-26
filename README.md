@@ -6,11 +6,12 @@ A comprehensive AI-powered system for assessing psychological safety and workpla
 
 The HSEG (Healthcare, Schools, Enterprise, Government) AI System provides:
 
-- **Individual Risk Assessment**: ML-powered psychological risk prediction for individual employees
-- **Text Crisis Detection**: NLP analysis of open-ended responses to identify crisis situations
-- **Organizational Risk Aggregation**: Company-wide culture health assessment and benchmarking
-- **Real-time Intervention Recommendations**: Actionable guidance for culture improvement
-- **Complete REST API**: Full integration capabilities for dashboards and applications
+- **🎯 Individual Risk Assessment**: ML-powered psychological risk prediction for individual employees
+- **🚨 Text Crisis Detection**: Zero-shot NLP analysis of open-ended responses to identify crisis situations
+- **🏢 Organizational Risk Aggregation**: Company-wide culture health assessment and benchmarking
+- **⚡ Real-time Intervention Recommendations**: Actionable guidance for culture improvement
+- **🚀 Complete REST API**: Full integration capabilities for dashboards and applications
+- **🎨 Modern Web Interface**: Premium glassmorphism UI with interactive analysis tools
 
 ## 🏗️ Project Structure
 
@@ -28,13 +29,36 @@ ai-modeling/
 │       ├── individual_risk_model.py    # Individual risk prediction
 │       ├── text_risk_classifier.py     # Text crisis detection
 │       └── organizational_risk_model.py # Organizational assessment
+├── frontend/                     # 🎨 Modern React Web Interface
+│   ├── src/                      # React source code
+│   │   ├── App.js               # Main application component
+│   │   └── App.css              # Enhanced glassmorphism styling
+│   ├── public/                   # Static assets
+│   │   └── index.html           # HTML template
+│   ├── sample_data/              # Demo data files
+│   │   ├── harassment_report.txt
+│   │   ├── mental_health_crisis.txt
+│   │   └── positive_feedback.txt
+│   ├── package.json              # React dependencies
+│   └── README.md                # Frontend documentation
 ├── docker/                       # Docker configuration
 │   ├── docker-compose.yml       # Container orchestration
 │   ├── docker-entrypoint.sh     # Startup script
 │   └── nginx.conf               # Reverse proxy config
 ├── tests/                        # Test files
 ├── docs/                         # Documentation
+│   ├── api/                      # API documentation
+│   ├── business/                 # Business documentation
+│   ├── deployment/               # Deployment guides
+│   ├── development/              # Development guides
+│   ├── technical/                # Technical specifications
+│   └── user-guides/              # User documentation
 ├── scripts/                      # Utility scripts
+│   ├── train.py                 # Model training scripts
+│   └── zero_shot_classify.py    # Zero-shot classification testing
+├── utils/                        # Utility functions
+│   ├── merge_json.py            # JSON data merging
+│   └── split_json.py            # JSON data splitting
 ├── database/                     # Database files (generated)
 ├── Dockerfile                    # Docker image definition
 ├── requirements.txt              # Python dependencies
@@ -117,7 +141,7 @@ response = requests.post("http://localhost:8000/predict/individual", json={
 
 result = response.json()
 print(f"Risk Tier: {result['overall_risk_tier']}")
-print(f"HSEG Score: {result['overall_hseg_score']}/28")
+print(f"Culture Score: {result['overall_hseg_score']}/28")
 ```
 
 ### Organizational Assessment
@@ -281,7 +305,7 @@ The “portal” refers to the React frontend (this repo) that talks to the Fast
 - `uvicorn app.api.main:app --host 0.0.0.0 --port 8000`
 - Verify: open `http://localhost:8000/health` and `http://localhost:8000/docs`
 
-3) Start Frontend (React)
+3) Start Enhanced Frontend (React)
 - `cd frontend`
 - `npm install`
 - Set API URL (one‑shot):
@@ -290,9 +314,55 @@ The “portal” refers to the React frontend (this repo) that talks to the Fast
 - `npm start`
 - Open `http://localhost:3000` in your browser
 
-4) Test the flow
-- Submit the survey form in the portal, or use the curl samples above.
-- Check the System Status card in the portal to confirm models are loaded and health is “healthy”.
+4) Experience the Modern UI
+- **Survey Playground**: Interactive 22-question assessment with animated sliders
+- **JSON Prediction Tool**: Direct API testing with sample data loading
+- **Text Classification**: Zero-shot analysis with multiple input methods
+- **Enhanced Visuals**: Glassmorphism cards, gradient backgrounds, hover effects
+- **Crisis Detection**: Real-time alerts with pulsing animations for high-risk scenarios
+
+## 🎨 **Enhanced Frontend Features**
+
+### **Premium Glassmorphism Design**
+- **Translucent Cards**: Blurred backgrounds with gradient borders
+- **Dynamic Animations**: Hover effects, floating elements, shimmer animations
+- **Modern Color Scheme**: Purple-blue gradients with interactive elements
+- **Crisis Alerts**: Pulsing red animations for high-risk scenarios
+- **Responsive Layout**: Mobile-first design with adaptive components
+
+### **Comprehensive Analysis Tools**
+
+#### **1. Survey Playground**
+- 📊 Complete 22-question psychological safety assessment
+- 🎯 Multiple sample data scenarios:
+  - 🔵 **Default Sample**: Balanced risk scenario
+  - 🔴 **High Risk Sample**: Crisis-level workplace conditions
+  - 🟢 **Positive Sample**: Thriving workplace environment
+- 📝 Text response fields for Q23-Q25 (suggestions, mental health, strengths)
+- 👥 Demographic data collection with real-time validation
+
+#### **2. JSON Prediction Tool**
+- 🔧 Direct JSON input for batch processing
+- 🎯 Smart sample data loading based on endpoint selection:
+  - Individual predictions: High Risk & Positive Individual samples
+  - Organizational predictions: Multi-employee organization sample
+- 📁 File upload support for JSON datasets
+- 👁️ Raw result display toggle for technical analysis
+
+#### **3. Text Classification Tool**
+- 🧠 Zero-shot classification for Q23-Q25 text responses
+- 📝 **Three Input Methods**:
+  - Manual input with separate text areas for each question
+  - File upload for bulk processing (.txt, .json files)
+  - Pre-loaded sample scenarios (Harassment, Crisis, Positive)
+- ⚡ Real-time processing with model performance metrics
+
+### **Advanced Results Display**
+- 🎯 **Merged Analysis**: Combined individual survey + text classification results
+- 📊 **Interactive Charts**: Color-coded risk visualizations with hover details
+- 🚨 **Crisis Detection**: Automatic self-harm alerts with urgent styling
+- ⚡ **Performance Metrics**: Processing time and confidence scores
+- 📋 **Comprehensive Reports**: Detailed category breakdowns and recommendations
 
 Optional: Docker
 - Build: `docker build -t hseg-ai .`

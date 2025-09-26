@@ -25,6 +25,26 @@ from app.models.database_models import (
 from app.models.individual_risk_model import IndividualRiskPredictor
 from app.models.text_risk_classifier import TextRiskClassifier
 from app.models.organizational_risk_model import OrganizationalRiskAggregator
+from transformers import pipeline as hf_pipeline
+import torch
+
+# --- Singleton for Hugging Face Zero-Shot Pipeline ---
+
+class ZeroShotClassifierSingleton:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            logger.info("Initializing Zero-Shot Classifier for the first time...")
+            device = 0 if torch.cuda.is_available() else -1
+            cls._instance = hf_pipeline(
+                "zero-shot-classification",
+                model="facebook/bart-large-mnli",
+                device=device
+            )
+            logger.info(f"Zero-Shot Classifier Initialized on device: {'cuda' if device == 0 else 'cpu'}")
+        return cls._instance
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -695,6 +715,60 @@ class HSEGMLPipeline:
                 }
             }
         }
+
+    async def analyze_communication_risk(self, text: str) -> Dict[str, Any]:
+        """
+        Analyze unstructured text for psychological safety risks using a 
+        two-step zero-shot classification pipeline.
+        """
+        start_time = datetime.now()
+
+        try:
+            classifier = ZeroShotClassifierSingleton.get_instance()
+
+            # --- Step 1: HSEG Risk Analysis ---
+            hseg_labels = [
+                "Power Abuse & Suppression",
+                "Failure of Accountability",
+                "Discrimination & Exclusion",
+                "Mental Health Harm",
+                "Manipulative Work Culture",
+                "Erosion of Voice & Autonomy"
+            ]
+            hseg_results = classifier(text, hseg_labels, multi_label=True)
+
+            # --- Step 2: Individual Distress Analysis ---
+            distress_labels = [
+                "Expressing severe personal distress, anxiety, or depression",
+                "Mentioning self-harm or suicidal thoughts",
+                "Neutral or positive sentiment"
+            ]
+            distress_results = classifier(text, distress_labels, multi_label=True)
+
+            # --- Structure the output ---
+            def structure_results(results):
+                return sorted(
+                    [{'label': label, 'score': score} for label, score in zip(results['labels'], results['scores'])],
+                    key=lambda x: x['score'],
+                    reverse=True
+                )
+
+            output = {
+                "hseg_risk_analysis": structure_results(hseg_results),
+                "individual_distress_analysis": structure_results(distress_results),
+                "processing_time_ms": (datetime.now() - start_time).total_seconds() * 1000,
+                "model_name": classifier.model.name_or_path
+            }
+            
+            return output
+
+        except Exception as e:
+            logger.error(f"Communication risk analysis failed: {e}")
+            return {
+                "error": str(e),
+                "prediction_timestamp": datetime.now().isoformat(),
+                "processing_time_ms": (datetime.now() - start_time).total_seconds() * 1000
+            }
     
     async def health_check(self) -> Dict[str, Any]:
         """Perform health check of the entire pipeline"""
@@ -780,6 +854,10 @@ async def reload_models() -> Dict[str, Any]:
         'model_version': pipeline.model_version
     }
 
+async def analyze_text_risk(text: str) -> Dict[str, Any]:
+    """Analyze text for communication risk using global pipeline"""
+    return await pipeline.analyze_communication_risk(text)
+
 # Export main components
 __all__ = [
     'HSEGMLPipeline',
@@ -790,6 +868,7 @@ __all__ = [
     'process_campaign',
     'get_pipeline_status',
     'health_check',
-    'reload_models'
+    'reload_models',
+    'analyze_text_risk'
 ]
     
