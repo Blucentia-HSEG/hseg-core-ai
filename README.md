@@ -593,16 +593,14 @@ mypy app/
 4. Push to branch (`git push origin feature/amazing-feature`)
 5. Open Pull Request
 
-## 📄 License
-
-This project is licensed under the MIT License - see LICENSE file for details.
-
 ## 🆘 Support
 
 For technical support or questions:
 - Create an issue in the repository
-- Email: support@hseg.org
-- Documentation: https://docs.hseg.org
+
+## 📄 License
+
+This project is part of the Blucentia transparency movement MVP demonstration.
 
 ---
 
